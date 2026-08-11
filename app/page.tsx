@@ -18,7 +18,7 @@ export default function Home() {
 
     try {
       // 로컬 테스트 시 http://localhost:8000, EC2 테스트 시 http://<EC2-PUBLIC-IP>:8000
-      const response = await fetch('http://localhost:8000/api/v1/reels/generate', {
+      const response = await fetch('http://13.125.30.129:8000/api/v1/reels/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
