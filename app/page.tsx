@@ -1,65 +1,104 @@
-import Image from "next/image";
+'use client'; // Next.js 사용 시 필수 선언
+
+import { useState } from 'react';
 
 export default function Home() {
+  const [prompt, setPrompt] = useState('');
+  const [videoUrl, setVideoUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleGenerate = async () => {
+    if (!prompt.trim()) {
+      alert('요청문을 입력해주세요!');
+      return;
+    }
+
+    setLoading(true);
+    setVideoUrl('');
+
+    try {
+      // 로컬 테스트 시 http://localhost:8000, EC2 테스트 시 http://<EC2-PUBLIC-IP>:8000
+      const response = await fetch('http://localhost:8000/api/v1/reels/generate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prompt }),
+      });
+
+      if (!response.ok) {
+        throw new Error('API 요청 실패');
+      }
+
+      const data = await response.json();
+      // 백엔드 응답의 video_url 저장
+      setVideoUrl(data.video_url);
+    } catch (error) {
+      console.error(error);
+      alert('영상 생성 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main style={{ maxWidth: '600px', margin: '50px auto', padding: '20px', fontFamily: 'sans-serif' }}>
+      <h2>숏폼 영상 생성기</h2>
+
+      {/* 1. 요청문 입력 영역 */}
+      <div style={{ marginBottom: '15px' }}>
+        <input
+          type="text"
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="생성할 영상 프롬프트를 입력하세요 (예: 신제품 홍보 영상)"
+          style={{
+            width: '100%',
+            padding: '12px',
+            fontSize: '16px',
+            borderRadius: '6px',
+            border: '1px solid #ccc',
+            boxSizing: 'border-box'
+          }}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+      </div>
+
+      {/* 2. 생성 버튼 */}
+      <button
+        onClick={handleGenerate}
+        disabled={loading}
+        style={{
+          width: '100%',
+          padding: '12px',
+          fontSize: '16px',
+          backgroundColor: loading ? '#ccc' : '#0070f3',
+          color: '#fff',
+          border: 'none',
+          borderRadius: '6px',
+          cursor: loading ? 'not-allowed' : 'pointer'
+        }}
+      >
+        {loading ? '영상 생성 중...' : '생성'}
+      </button>
+
+      {/* 3. 영상 결과 영역 */}
+      <div style={{ marginTop: '30px', textAlign: 'center' }}>
+        {loading && <p>S3에서 영상을 불러오는 중입니다...</p>}
+        
+        {videoUrl ? (
+          <div>
+            <h3>생성 완료!</h3>
+            <video
+              src={videoUrl}
+              controls
+              autoPlay
+              style={{ width: '100%', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          </div>
+        ) : (
+          !loading && <p style={{ color: '#888' }}>상단에 프롬프트를 입력하고 생성 버튼을 눌러주세요.</p>
+        )}
+      </div>
+    </main>
   );
 }
