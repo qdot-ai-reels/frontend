@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import rawEventData from '../data/events.json';
 
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '');
+
 // JSON에서 실제 공구 단품 목록 추출
 const ALL_PRODUCTS = rawEventData.events.flatMap((event) =>
   event.products.map((prod) => ({
@@ -36,7 +38,7 @@ export default function Home() {
     setStatusText('OpenRouter AI가 상품 정보를 분석하여 규격 대본을 생성 중입니다...');
 
     try {
-      const response = await fetch('http://localhost:8000/api/v1/reels/script', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/reels/script`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -72,7 +74,7 @@ export default function Home() {
     setVideoUrl(null);
 
     try {
-      const response = await fetch('http://localhost:8000/api/v1/reels/video', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/reels/video`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
