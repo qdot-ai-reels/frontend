@@ -64,9 +64,29 @@ export interface ScriptDocument {
   };
 }
 
+export type GenerationJobStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface GenerationJobStartResponse {
+  job_id: string;
+  status: GenerationJobStatus;
+  status_url: string;
+}
+
+export interface GenerationJobStatusResponse {
+  job_id: string;
+  status: GenerationJobStatus;
+  error?: string | null;
+  video_url?: string | null;
+  download_url?: string | null;
+}
+
 export interface VideoResult {
   jobId: string | null;
-  status: string;
+  status: GenerationJobStatus;
   videoUrl: string | null;
   downloadUrl: string | null;
   s3ObjectKey: string | null;

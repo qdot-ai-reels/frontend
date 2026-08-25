@@ -1,4 +1,6 @@
 import type {
+  GenerationJobStartResponse,
+  GenerationJobStatusResponse,
   GenerationOptions,
   Product,
   ReelsApi,
@@ -9,6 +11,16 @@ import type {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ??
   'http://localhost:8000';
+
+const STATUS_POLL_INTERVAL_MS = 2_000;
+const STATUS_POLL_TIMEOUT_MS = 20 * 60 * 1_000;
+
+const delay = (milliseconds: number) =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+
+function apiUrl(path: string): string {
+  return new URL(path, `${API_BASE_URL}/`).toString();
+}
 
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
@@ -37,6 +49,46 @@ function buildAdditionalPrompt(options: GenerationOptions): string {
     .join('\n');
 }
 
+async function waitForFinalVideo(
+  jobId: string,
+  statusUrl: string,
+): Promise<VideoResult> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < STATUS_POLL_TIMEOUT_MS) {
+    const response = await fetch(apiUrl(statusUrl), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(
+        await readError(response, '최종 영상 생성 상태를 확인하지 못했습니다.'),
+      );
+    }
+
+    const payload = (await response.json()) as GenerationJobStatusResponse;
+    if (payload.status === 'FAILED') {
+      throw new Error(payload.error || '최종 영상 생성에 실패했습니다.');
+    }
+    if (payload.status === 'COMPLETED') {
+      if (!payload.video_url || !payload.download_url) {
+        throw new Error('완료된 영상의 재생 또는 다운로드 URL이 없습니다.');
+      }
+      return {
+        jobId,
+        status: payload.status,
+        videoUrl: apiUrl(payload.video_url),
+        downloadUrl: apiUrl(payload.download_url),
+        s3ObjectKey: null,
+      };
+    }
+    if (payload.status !== 'PENDING' && payload.status !== 'PROCESSING') {
+      throw new Error(`지원하지 않는 생성 상태입니다: ${String(payload.status)}`);
+    }
+
+    await delay(STATUS_POLL_INTERVAL_MS);
+  }
+
+  throw new Error('최종 영상 생성 대기 시간이 초과되었습니다.');
+}
+
 export const httpReelsApi: ReelsApi = {
   async generateScript(product, options) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/script`, {
@@ -62,53 +114,31 @@ export const httpReelsApi: ReelsApi = {
   },
 
   async generateFinalVideo(product, script) {
-    // 현재 develop 계약은 TTS 결합 전 /video입니다. 개발자 1의 최종 생성
-    // 엔드포인트가 확정되면 이 함수의 URL과 요청 본문만 교체하면 됩니다.
-    const response = await fetch(`${API_BASE_URL}/api/v1/reels/video`, {
+    const response = await fetch(`${API_BASE_URL}/api/v1/reels/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         script,
         image_url: product.imageUrl,
-        aspect_ratio: '9:16',
-        generate_audio: false,
       }),
     });
 
     if (!response.ok) {
-      throw new Error(await readError(response, '영상 생성에 실패했습니다.'));
+      throw new Error(await readError(response, '최종 영상 생성을 시작하지 못했습니다.'));
     }
 
-    const payload = (await response.json()) as {
-      job_id?: string;
-      status?: string;
-      video_url?: string;
-      download_url?: string;
-      s3_object_key?: string;
-    };
-
-    return {
-      jobId: payload.job_id ?? null,
-      status: payload.status ?? 'completed',
-      videoUrl: payload.video_url ?? null,
-      downloadUrl: payload.download_url ?? null,
-      s3ObjectKey: payload.s3_object_key ?? null,
-    };
+    const payload = (await response.json()) as GenerationJobStartResponse;
+    if (!payload.job_id || !payload.status_url) {
+      throw new Error('생성 작업 ID 또는 상태 조회 URL이 없습니다.');
+    }
+    return waitForFinalVideo(payload.job_id, payload.status_url);
   },
 
   async renewVideoUrl(jobId, download = false) {
-    const params = new URLSearchParams({ download: String(download) });
-    const response = await fetch(
-      `${API_BASE_URL}/api/v1/reels/video/${encodeURIComponent(jobId)}/url?${params}`,
+    const suffix = download ? '?download=true' : '';
+    return apiUrl(
+      `/api/v1/reels/generate/${encodeURIComponent(jobId)}/file${suffix}`,
     );
-    if (!response.ok) {
-      throw new Error(await readError(response, '영상 URL 재발급에 실패했습니다.'));
-    }
-    const payload = (await response.json()) as { url?: string };
-    if (!payload.url) {
-      throw new Error('재발급된 영상 URL이 없습니다.');
-    }
-    return payload.url;
   },
 };
 

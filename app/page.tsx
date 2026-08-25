@@ -10,14 +10,32 @@ import type {
   AppStep,
   GenerationOptions,
   Product,
+  ReelsApi,
   ScriptDocument,
   VideoResult,
 } from '../types/reels';
 
-// 외부 API를 호출하지 않고 화면 전환을 확인하는 복사용 기본값입니다.
-// 실제 백엔드 연동 시험 시 false로 바꾸면 현재 develop API를 호출합니다.
-const USE_MOCK_API = true;
-const reelsApi = USE_MOCK_API ? mockReelsApi : httpReelsApi;
+// 스크립트 제공자의 403을 우회하되 최종 생성 파이프라인은 실제 백엔드로
+// 검증하기 위한 임시 통합 시험 설정입니다.
+const USE_MOCK_SCRIPT = true;
+const USE_MOCK_FINAL_VIDEO = false;
+const reelsApi: ReelsApi = {
+  generateScript: USE_MOCK_SCRIPT
+    ? mockReelsApi.generateScript
+    : httpReelsApi.generateScript,
+  generateFinalVideo: USE_MOCK_FINAL_VIDEO
+    ? mockReelsApi.generateFinalVideo
+    : httpReelsApi.generateFinalVideo,
+  renewVideoUrl: USE_MOCK_FINAL_VIDEO
+    ? mockReelsApi.renewVideoUrl
+    : httpReelsApi.renewVideoUrl,
+};
+
+const modeLabel = USE_MOCK_FINAL_VIDEO
+  ? 'MOCK MODE'
+  : USE_MOCK_SCRIPT
+    ? 'HYBRID MODE'
+    : 'BACKEND MODE';
 
 const INITIAL_OPTIONS: GenerationOptions = {
   durationSeconds: 6,
@@ -185,8 +203,8 @@ export default function Home() {
             <p className="eyebrow">QUEDOT SHORTS STUDIO</p>
             <h1>AI 릴스 영상 만들기</h1>
           </div>
-          <span className={`mode-badge ${USE_MOCK_API ? 'mock' : 'live'}`}>
-            {USE_MOCK_API ? 'MOCK MODE' : 'BACKEND MODE'}
+          <span className={`mode-badge ${USE_MOCK_FINAL_VIDEO ? 'mock' : 'live'}`}>
+            {modeLabel}
           </span>
         </header>
 
@@ -485,8 +503,8 @@ export default function Home() {
                     <dd>{videoResult.status}</dd>
                   </div>
                   <div>
-                    <dt>S3 경로</dt>
-                    <dd>{videoResult.s3ObjectKey ?? '목 모드'}</dd>
+                    <dt>결과 저장 위치</dt>
+                    <dd>{videoResult.s3ObjectKey ?? '백엔드 최종 결과 파일'}</dd>
                   </div>
                 </dl>
 
@@ -503,7 +521,7 @@ export default function Home() {
                   <button
                     type="button"
                     className="secondary-button"
-                    disabled={!videoResult.jobId || USE_MOCK_API}
+                    disabled={!videoResult.jobId || USE_MOCK_FINAL_VIDEO}
                     onClick={() => renewUrl(false)}
                   >
                     재생 URL 갱신
@@ -513,8 +531,8 @@ export default function Home() {
             </div>
 
             <p className="scope-note">
-              Caption 설정·렌더링은 이번 수요일 데모 범위에서 제외되어 결과 재생·다운로드만
-              구성했습니다.
+              Caption 설정 UI는 이번 데모 범위에서 제외했으며, 백엔드 기본 설정으로 렌더링된
+              최종 결과를 재생·다운로드합니다.
             </p>
 
             <FooterActions>
@@ -629,7 +647,7 @@ function LoadingPage({ title, description }: { title: string; description: strin
       <div className="spinner" aria-hidden="true" />
       <h2>{title}</h2>
       <p>{description}</p>
-      <small>작업 중에는 창을 닫지 마세요.</small>
+      <small>작업 중에는 창을 닫거나 생성 버튼을 다시 누르지 마세요.</small>
     </section>
   );
 }

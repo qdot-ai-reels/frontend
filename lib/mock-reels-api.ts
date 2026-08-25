@@ -37,7 +37,7 @@ function buildMockScript(
         visual: `${product.name}을 화면 중앙에 보여준다.`,
         auditory: {
           subtitle: '이 구성, 지금 확인하세요',
-          voiceover: '이 구성, 놓치지 마세요.',
+          voiceover: '주목하세요.',
         },
         notes: '첫 장면에서 상품을 명확히 노출한다.',
       },
@@ -47,7 +47,7 @@ function buildMockScript(
         visual: '상품 구성과 핵심 장점을 차례로 보여준다.',
         auditory: {
           subtitle: product.name,
-          voiceover: `${product.name}, 필요한 구성만 알차게 담았어요.`,
+          voiceover: '알찬 구성이에요.',
         },
         notes: options.mustInclude || '상품의 핵심 장점을 전달한다.',
       },
@@ -57,7 +57,7 @@ function buildMockScript(
         visual: '상품 이미지와 CTA 문구를 함께 보여준다.',
         auditory: {
           subtitle: options.cta,
-          voiceover: options.cta,
+          voiceover: '지금 확인해요.',
         },
         notes: options.mustExclude
           ? `포함 금지: ${options.mustExclude}`
@@ -81,7 +81,7 @@ export const mockReelsApi: ReelsApi = {
     await delay(900);
     return {
       jobId: 'mock-job-001',
-      status: 'completed',
+      status: 'COMPLETED',
       videoUrl: null,
       downloadUrl: null,
       s3ObjectKey: 'outputs/mock-job-001/final.mp4',
