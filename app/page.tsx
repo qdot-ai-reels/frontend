@@ -58,6 +58,10 @@ const STEP_NUMBER: Record<AppStep, number> = {
 };
 
 const STEP_LABELS = ['공구 선택', '사용자 입력', '스크립트 확인', '영상 생성 완료'];
+const VIDEO_DURATION_OPTIONS = Array.from({ length: 12 }, (_, index) => {
+  const duration = index + 4;
+  return [String(duration), `${duration}초`] as [string, string];
+});
 
 function formatPrice(price: number) {
   return new Intl.NumberFormat('ko-KR').format(price);
@@ -330,11 +334,7 @@ export default function Home() {
                   label="영상 길이"
                   value={String(options.durationSeconds)}
                   onChange={(value) => updateOption('durationSeconds', Number(value))}
-                  options={[
-                    ['4', '4초'],
-                    ['6', '6초'],
-                    ['8', '8초'],
-                  ]}
+                  options={VIDEO_DURATION_OPTIONS}
                 />
                 <ReadOnlyField label="화면 비율" value="9:16" />
                 <ReadOnlyField label="해상도" value="자동" />
