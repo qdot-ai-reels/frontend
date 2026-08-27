@@ -15,9 +15,8 @@ import type {
   VideoResult,
 } from '../types/reels';
 
-// 스크립트 제공자의 403을 우회하되 최종 생성 파이프라인은 실제 백엔드로
-// 검증하기 위한 임시 통합 시험 설정입니다.
-const USE_MOCK_SCRIPT = true;
+
+const USE_MOCK_SCRIPT = false;
 const USE_MOCK_FINAL_VIDEO = false;
 const reelsApi: ReelsApi = {
   generateScript: USE_MOCK_SCRIPT
