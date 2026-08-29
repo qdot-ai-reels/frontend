@@ -152,6 +152,7 @@ export const httpReelsApi: ReelsApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         product: product.rawProduct,
+        image_url: product.imageUrl,
         prompt: buildAdditionalPrompt(options),
         max_duration_seconds: options.durationSeconds,
         channel: options.channel,
