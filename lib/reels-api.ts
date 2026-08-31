@@ -13,7 +13,10 @@ const API_BASE_URL =
   'http://localhost:8000';
 
 const STATUS_POLL_INTERVAL_MS = 2_000;
-const STATUS_POLL_TIMEOUT_MS = 20 * 60 * 1_000;
+// The backend may make up to three video-generation attempts, each polling
+// for up to six minutes. Keep a little buffer for request and processing
+// overhead before reporting a client-side timeout.
+const STATUS_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const AI_INFLUENCER_IMAGE_URL =
   'https://lh3.googleusercontent.com/d/1enbiDWV-2TBqDlXNjCOL0WzgPrfR9UGv';
 
@@ -51,56 +54,70 @@ function buildAdditionalPrompt(options: GenerationOptions): string {
     .join('\n');
 }
 
+type JsonRecord = Record<string, unknown>;
+
+function asRecord(value: unknown): JsonRecord {
+  return value && typeof value === 'object' ? (value as JsonRecord) : {};
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
 function normalizeScriptDocument(payload: unknown): ScriptDocument {
   const candidate =
     payload && typeof payload === 'object' && 'script' in payload
       ? (payload as { script?: unknown }).script
       : payload;
-  const document = candidate as Record<string, any>;
+  const document = asRecord(candidate);
 
-  if (document?.summary && Array.isArray(document.scenes)) {
-    return document as ScriptDocument;
+  if (document.summary && Array.isArray(document.scenes)) {
+    return document as unknown as ScriptDocument;
   }
 
-  const product = document?.product ?? {};
-  const customer = document?.customer ?? {};
-  const ads = document?.ads ?? {};
-  const video = document?.video ?? {};
-  const scenes = Array.isArray(document?.scenes) ? document.scenes : [];
+  const product = asRecord(document.product);
+  const customer = asRecord(document.customer);
+  const ads = asRecord(document.ads);
+  const meta = asRecord(document.meta);
+  const etc = asRecord(document.etc);
+  const scenes = Array.isArray(document.scenes) ? document.scenes : [];
 
   return {
     meta: {
-      output_format_version: String(document?.meta?.output_format_version ?? '1.0'),
-      framework: String(document?.etc?.video_ads_methodology ?? 'Hook-Body-CTA'),
-      language: String(document?.meta?.language ?? 'ko'),
+      output_format_version: String(meta.output_format_version ?? '1.0'),
+      framework: String(etc.video_ads_methodology ?? 'Hook-Body-CTA'),
+      language: String(meta.language ?? 'ko'),
     },
     summary: {
       main_target: String(customer.main_target ?? ads.main_target ?? ''),
       pain_point: String(customer.pain_point ?? ''),
       product_usp: String(product.usp ?? ''),
       key_message: String(ads.cta_action ?? product.usp ?? ''),
-      tone_and_manner: String(ads.speaker?.tone ?? ''),
+      tone_and_manner: String(asRecord(ads.speaker).tone ?? ''),
     },
-    scenes: scenes.map((scene: Record<string, any>) => ({
+    scenes: scenes.map((sceneValue: unknown) => {
+      const scene = asRecord(sceneValue);
+      const auditory = asRecord(scene.auditory);
+      const timeRange = asRecord(scene.time_range_sec);
+      return {
       scene_name: String(scene.section ?? scene.scene_name ?? 'Scene'),
       time_range_sec: {
-        start: Number(scene.time_range_sec?.start ?? 0),
-        end: Number(scene.time_range_sec?.end ?? 0),
+        start: Number(timeRange.start ?? 0),
+        end: Number(timeRange.end ?? 0),
       },
       visual: String(scene.visual ?? ''),
       auditory: {
-        subtitle: String(scene.auditory?.subtitle ?? ''),
-        voiceover: scene.auditory?.voiceover ?? null,
+        subtitle: String(auditory.subtitle ?? ''),
+        voiceover: typeof auditory.voiceover === 'string' ? auditory.voiceover : null,
       },
       notes: String(scene.notes ?? scene.intent ?? ''),
-    })),
+      };
+    }),
     compliance_notes: {
-      avoid: Array.isArray(document?.compliance_notes?.avoid)
-        ? document.compliance_notes.avoid
-        : [],
-      focus: Array.isArray(document?.compliance_notes?.focus)
-        ? document.compliance_notes.focus
-        : [],
+      avoid: asStringArray(asRecord(document.compliance_notes).avoid),
+      focus: asStringArray(asRecord(document.compliance_notes).focus),
     },
   };
 }
@@ -152,6 +169,7 @@ export const httpReelsApi: ReelsApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         product: product.rawProduct,
+        image_url: product.imageUrl,
         prompt: buildAdditionalPrompt(options),
         max_duration_seconds: options.durationSeconds,
         channel: options.channel,
