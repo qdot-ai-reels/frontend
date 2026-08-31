@@ -13,7 +13,10 @@ const API_BASE_URL =
   'http://localhost:8000';
 
 const STATUS_POLL_INTERVAL_MS = 2_000;
-const STATUS_POLL_TIMEOUT_MS = 20 * 60 * 1_000;
+// The backend may make up to three video-generation attempts, each polling
+// for up to six minutes. Keep a little buffer for request and processing
+// overhead before reporting a client-side timeout.
+const STATUS_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const AI_INFLUENCER_IMAGE_URL =
   'https://lh3.googleusercontent.com/d/1enbiDWV-2TBqDlXNjCOL0WzgPrfR9UGv';
 
