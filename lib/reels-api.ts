@@ -188,6 +188,7 @@ export const httpReelsApi: ReelsApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        product: product.rawProduct,
         script,
         image_url: product.imageUrl,
         influencer_image_url: AI_INFLUENCER_IMAGE_URL,
