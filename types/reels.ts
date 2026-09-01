@@ -70,6 +70,15 @@ export type GenerationJobStatus =
   | 'COMPLETED'
   | 'FAILED';
 
+export type GenerationStage =
+  | 'QUEUED'
+  | 'TTS_GENERATION'
+  | 'VIDEO_GENERATION'
+  | 'AUDIO_MERGE'
+  | 'CAPTION_RENDER'
+  | 'COMPLETED'
+  | 'FAILED';
+
 export interface GenerationJobStartResponse {
   job_id: string;
   status: GenerationJobStatus;
@@ -79,6 +88,9 @@ export interface GenerationJobStartResponse {
 export interface GenerationJobStatusResponse {
   job_id: string;
   status: GenerationJobStatus;
+  stage?: GenerationStage | null;
+  elapsed_seconds?: number | null;
+  message?: string | null;
   error?: string | null;
   video_url?: string | null;
   download_url?: string | null;
@@ -100,6 +112,7 @@ export interface ReelsApi {
   generateFinalVideo(
     product: Product,
     script: ScriptDocument,
+    onProgress?: (status: GenerationJobStatusResponse) => void,
   ): Promise<VideoResult>;
   renewVideoUrl(jobId: string, download?: boolean): Promise<string>;
 }

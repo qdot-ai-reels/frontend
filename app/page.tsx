@@ -9,6 +9,8 @@ import { httpReelsApi } from '../lib/reels-api';
 import type {
   AppStep,
   GenerationOptions,
+  GenerationJobStatusResponse,
+  GenerationStage,
   Product,
   ReelsApi,
   ScriptDocument,
@@ -62,12 +64,29 @@ const VIDEO_DURATION_OPTIONS = Array.from({ length: 12 }, (_, index) => {
   return [String(duration), `${duration}초`] as [string, string];
 });
 
+const GENERATION_STAGE_LABELS: Record<GenerationStage, string> = {
+  QUEUED: '생성 작업 준비 중',
+  TTS_GENERATION: '음성 생성 중',
+  VIDEO_GENERATION: '영상 생성 중',
+  AUDIO_MERGE: '영상과 음성 결합 중',
+  CAPTION_RENDER: 'Caption 적용 중',
+  COMPLETED: '생성 완료',
+  FAILED: '생성 실패',
+};
+
 function formatPrice(price: number) {
   return new Intl.NumberFormat('ko-KR').format(price);
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '알 수 없는 오류가 발생했습니다.';
+}
+
+function formatElapsedSeconds(seconds: number | null | undefined) {
+  if (seconds == null) return '계산 중';
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes}분 ${remainingSeconds}초`;
 }
 
 export default function Home() {
@@ -78,6 +97,8 @@ export default function Home() {
   const [options, setOptions] = useState<GenerationOptions>(INITIAL_OPTIONS);
   const [script, setScript] = useState<ScriptDocument | null>(null);
   const [videoResult, setVideoResult] = useState<VideoResult | null>(null);
+  const [generationProgress, setGenerationProgress] =
+    useState<GenerationJobStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const events = useMemo(
@@ -160,9 +181,14 @@ export default function Home() {
     if (!script) return;
     setError(null);
     setVideoResult(null);
+    setGenerationProgress(null);
     setStep('video-loading');
     try {
-      const generated = await reelsApi.generateFinalVideo(selectedProduct, script);
+      const generated = await reelsApi.generateFinalVideo(
+        selectedProduct,
+        script,
+        setGenerationProgress,
+      );
       setVideoResult(generated);
       setStep('result');
     } catch (requestError) {
@@ -470,7 +496,21 @@ export default function Home() {
           <LoadingPage
             title="최종 영상 생성 중..."
             description="영상과 음성을 생성하고 결과를 준비하고 있습니다."
-          />
+          >
+            {generationProgress && (
+              <div className="generation-progress" aria-live="polite">
+                <strong>
+                  {generationProgress.stage
+                    ? GENERATION_STAGE_LABELS[generationProgress.stage]
+                    : generationProgress.status}
+                </strong>
+                <span>
+                  경과 시간: {formatElapsedSeconds(generationProgress.elapsed_seconds)}
+                </span>
+                <p>{generationProgress.message ?? '작업을 처리하고 있습니다.'}</p>
+              </div>
+            )}
+          </LoadingPage>
         )}
 
         {step === 'result' && videoResult && (
@@ -640,12 +680,21 @@ function ReadOnlyField({ label, value }: { label: string; value: string }) {
   );
 }
 
-function LoadingPage({ title, description }: { title: string; description: string }) {
+function LoadingPage({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children?: ReactNode;
+}) {
   return (
     <section className="loading-page">
       <div className="spinner" aria-hidden="true" />
       <h2>{title}</h2>
       <p>{description}</p>
+      {children}
       <small>작업 중에는 창을 닫거나 생성 버튼을 다시 누르지 마세요.</small>
     </section>
   );

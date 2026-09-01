@@ -478,6 +478,28 @@ input[readonly] {
   color: var(--muted);
 }
 
+.generation-progress {
+  display: grid;
+  gap: 7px;
+  min-width: min(100%, 360px);
+  margin: 22px 0 10px;
+  padding: 16px 20px;
+  border: 1px solid #dce2eb;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.generation-progress strong {
+  color: var(--ink);
+}
+
+.generation-progress span,
+.generation-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
 .loading-page small {
   color: #9aa2af;
 }
