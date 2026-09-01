@@ -125,6 +125,7 @@ function normalizeScriptDocument(payload: unknown): ScriptDocument {
 async function waitForFinalVideo(
   jobId: string,
   statusUrl: string,
+  onProgress?: (status: GenerationJobStatusResponse) => void,
 ): Promise<VideoResult> {
   const startedAt = Date.now();
 
@@ -137,6 +138,7 @@ async function waitForFinalVideo(
     }
 
     const payload = (await response.json()) as GenerationJobStatusResponse;
+    onProgress?.(payload);
     if (payload.status === 'FAILED') {
       throw new Error(payload.error || '최종 영상 생성에 실패했습니다.');
     }
@@ -183,7 +185,7 @@ export const httpReelsApi: ReelsApi = {
     return normalizeScriptDocument(await response.json());
   },
 
-  async generateFinalVideo(product, script) {
+  async generateFinalVideo(product, script, onProgress) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -203,7 +205,7 @@ export const httpReelsApi: ReelsApi = {
     if (!payload.job_id || !payload.status_url) {
       throw new Error('생성 작업 ID 또는 상태 조회 URL이 없습니다.');
     }
-    return waitForFinalVideo(payload.job_id, payload.status_url);
+    return waitForFinalVideo(payload.job_id, payload.status_url, onProgress);
   },
 
   async renewVideoUrl(jobId, download = false) {
