@@ -122,6 +122,7 @@ export interface ReelsApi {
   generateFinalVideo(
     product: Product,
     script: ScriptDocument,
+    options: GenerationOptions,
     onProgress?: (status: GenerationJobStatusResponse) => void,
   ): Promise<VideoResult>;
   renewVideoUrl(jobId: string, download?: boolean): Promise<string>;

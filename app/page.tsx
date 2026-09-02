@@ -190,6 +190,7 @@ export default function Home() {
       const generated = await reelsApi.generateFinalVideo(
         selectedProduct,
         script,
+        options,
         setGenerationProgress,
       );
       setVideoResult(generated);

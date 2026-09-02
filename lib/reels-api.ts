@@ -251,7 +251,7 @@ export const httpReelsApi: ReelsApi = {
     return waitForScript(payload.job_id, payload.status_url);
   },
 
-  async generateFinalVideo(product, script, onProgress) {
+  async generateFinalVideo(product, script, options, onProgress) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -260,6 +260,7 @@ export const httpReelsApi: ReelsApi = {
         script,
         image_url: product.imageUrl,
         influencer_image_url: AI_INFLUENCER_IMAGE_URL,
+        max_duration_seconds: options.durationSeconds,
       }),
     });
 
