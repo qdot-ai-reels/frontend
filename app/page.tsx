@@ -66,7 +66,10 @@ const VIDEO_DURATION_OPTIONS = Array.from({ length: 12 }, (_, index) => {
 
 const GENERATION_STAGE_LABELS: Record<GenerationStage, string> = {
   QUEUED: '생성 작업 준비 중',
+  SCRIPT_GENERATION: '스크립트 생성 중',
+  SCRIPT_REGENERATION: '스크립트 다시 생성 중',
   TTS_GENERATION: '음성 생성 중',
+  TTS_VALIDATION: '음성 길이 확인 중',
   VIDEO_GENERATION: '영상 생성 중',
   AUDIO_MERGE: '영상과 음성 결합 중',
   CAPTION_RENDER: 'Caption 적용 중',
