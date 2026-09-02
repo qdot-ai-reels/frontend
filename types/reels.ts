@@ -88,6 +88,11 @@ export interface GenerationJobStartResponse {
   status_url: string;
 }
 
+export interface ScriptJobStatusResponse extends GenerationJobStatusResponse {
+  input_type?: string;
+  script?: unknown;
+}
+
 export interface GenerationJobStatusResponse {
   job_id: string;
   status: GenerationJobStatus;

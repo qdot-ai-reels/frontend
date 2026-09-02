@@ -1,6 +1,7 @@
 import type {
   GenerationJobStartResponse,
   GenerationJobStatusResponse,
+  ScriptJobStatusResponse,
   GenerationOptions,
   Product,
   ReelsApi,
@@ -13,9 +14,9 @@ const API_BASE_URL =
   'http://localhost:8000';
 
 const STATUS_POLL_INTERVAL_MS = 2_000;
-// The backend may make up to three video-generation attempts, each polling
-// for up to six minutes. Keep a little buffer for request and processing
-// overhead before reporting a client-side timeout.
+// Five script attempts can each spend up to one provider request timeout.
+// Keep enough time for retries while the browser only polls the job status.
+const SCRIPT_STATUS_POLL_TIMEOUT_MS = 10 * 60 * 1_000;
 const STATUS_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const AI_INFLUENCER_IMAGE_URL =
   'https://lh3.googleusercontent.com/d/1enbiDWV-2TBqDlXNjCOL0WzgPrfR9UGv';
@@ -193,6 +194,38 @@ async function waitForFinalVideo(
   throw new Error('최종 영상 생성 대기 시간이 초과되었습니다.');
 }
 
+async function waitForScript(
+  jobId: string,
+  statusUrl: string,
+): Promise<ScriptDocument> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < SCRIPT_STATUS_POLL_TIMEOUT_MS) {
+    const response = await fetch(apiUrl(statusUrl), { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(await readError(response, '스크립트 생성 상태를 확인하지 못했습니다.'));
+    }
+
+    const payload = (await response.json()) as ScriptJobStatusResponse;
+    if (payload.status === 'FAILED') {
+      throw new Error(payload.error || '스크립트 생성에 실패했습니다.');
+    }
+    if (payload.status === 'COMPLETED') {
+      if (!payload.script) {
+        throw new Error('완료된 스크립트가 응답에 없습니다.');
+      }
+      return normalizeScriptDocument(payload.script);
+    }
+    if (payload.status !== 'PENDING' && payload.status !== 'PROCESSING') {
+      throw new Error(`지원하지 않는 스크립트 생성 상태입니다: ${String(payload.status)}`);
+    }
+
+    await delay(STATUS_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(`스크립트 생성 대기 시간이 초과되었습니다. job_id=${jobId}`);
+}
+
 export const httpReelsApi: ReelsApi = {
   async generateScript(product, options) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/script`, {
@@ -211,7 +244,11 @@ export const httpReelsApi: ReelsApi = {
       throw new Error(await readError(response, '스크립트 생성에 실패했습니다.'));
     }
 
-    return normalizeScriptDocument(await response.json());
+    const payload = (await response.json()) as GenerationJobStartResponse;
+    if (!payload.job_id || !payload.status_url) {
+      throw new Error('스크립트 생성 작업 ID 또는 상태 조회 URL이 없습니다.');
+    }
+    return waitForScript(payload.job_id, payload.status_url);
   },
 
   async generateFinalVideo(product, script, onProgress) {
