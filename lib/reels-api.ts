@@ -20,6 +20,16 @@ const STATUS_POLL_TIMEOUT_MS = 30 * 60 * 1_000;
 const AI_INFLUENCER_IMAGE_URL =
   'https://lh3.googleusercontent.com/d/1enbiDWV-2TBqDlXNjCOL0WzgPrfR9UGv';
 
+const GENERATION_STAGE_MESSAGES: Record<string, string> = {
+  SCRIPT_GENERATION: '스크립트 생성 단계',
+  SCRIPT_REGENERATION: '스크립트 재생성 단계',
+  TTS_GENERATION: 'TTS 생성 단계',
+  TTS_VALIDATION: 'TTS 검증 단계',
+  VIDEO_GENERATION: '영상 생성 단계',
+  AUDIO_MERGE: '영상과 음성 결합 단계',
+  CAPTION_RENDER: 'Caption 적용 단계',
+};
+
 const delay = (milliseconds: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
@@ -29,9 +39,23 @@ function apiUrl(path: string): string {
 
 async function readError(response: Response, fallback: string): Promise<string> {
   try {
-    const payload = (await response.json()) as { detail?: unknown };
+    const payload = (await response.json()) as {
+      detail?: unknown;
+    };
     if (typeof payload.detail === 'string') {
       return payload.detail;
+    }
+    if (payload.detail && typeof payload.detail === 'object') {
+      const detail = payload.detail as { message?: unknown; stage?: unknown };
+      if (typeof detail.message === 'string') {
+        const stageLabel =
+          typeof detail.stage === 'string'
+            ? GENERATION_STAGE_MESSAGES[detail.stage] || detail.stage
+            : null;
+        return detail.stage
+          ? `${stageLabel}에서 실패했습니다. ${detail.message}`
+          : detail.message;
+      }
     }
     if (payload.detail) {
       return JSON.stringify(payload.detail);
@@ -140,7 +164,12 @@ async function waitForFinalVideo(
     const payload = (await response.json()) as GenerationJobStatusResponse;
     onProgress?.(payload);
     if (payload.status === 'FAILED') {
-      throw new Error(payload.error || '최종 영상 생성에 실패했습니다.');
+      const stage = payload.stage
+        ? GENERATION_STAGE_MESSAGES[payload.stage] || payload.stage
+        : '알 수 없는 단계';
+      throw new Error(
+        `${stage}에서 실패했습니다. ${payload.error || '상세 원인이 없습니다.'}`,
+      );
     }
     if (payload.status === 'COMPLETED') {
       if (!payload.video_url || !payload.download_url) {

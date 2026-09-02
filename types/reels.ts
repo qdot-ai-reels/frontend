@@ -72,7 +72,10 @@ export type GenerationJobStatus =
 
 export type GenerationStage =
   | 'QUEUED'
+  | 'SCRIPT_GENERATION'
+  | 'SCRIPT_REGENERATION'
   | 'TTS_GENERATION'
+  | 'TTS_VALIDATION'
   | 'VIDEO_GENERATION'
   | 'AUDIO_MERGE'
   | 'CAPTION_RENDER'
@@ -92,6 +95,8 @@ export interface GenerationJobStatusResponse {
   elapsed_seconds?: number | null;
   message?: string | null;
   error?: string | null;
+  error_code?: string | null;
+  retryable?: boolean | null;
   video_url?: string | null;
   download_url?: string | null;
 }
