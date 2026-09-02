@@ -1,4 +1,5 @@
 import rawEventData from './events.json';
+import extraEventData from './extra-events.json';
 
 import type { Product } from '../types/reels';
 
@@ -42,8 +43,14 @@ const toNumber = (value: unknown): number => {
 };
 
 const eventData = rawEventData as QuedotEventData;
+const additionalEventData = extraEventData as QuedotEventData;
 
-export const PRODUCTS: Product[] = (eventData.events ?? []).flatMap((event) =>
+const allEvents = [
+  ...(eventData.events ?? []),
+  ...(additionalEventData.events ?? []),
+];
+
+export const PRODUCTS: Product[] = allEvents.flatMap((event) =>
   (event.products ?? []).map((product) => {
     const discountRate = toNumber(product.discount_rate_derived);
 
