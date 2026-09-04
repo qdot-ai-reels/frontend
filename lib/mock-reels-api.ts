@@ -1,4 +1,5 @@
 import type {
+  GenerationProgress,
   GenerationOptions,
   Product,
   ReelsApi,
@@ -77,15 +78,68 @@ export const mockReelsApi: ReelsApi = {
     return buildMockScript(product, options);
   },
 
-  async generateFinalVideo(): Promise<VideoResult> {
+  async generateFinalVideo(_product, _script, options, onProgress): Promise<VideoResult> {
+    const candidates = Array.from({ length: options.outputCount }, (_, index) => ({
+      candidateId: `candidate-${String(index + 1).padStart(2, '0')}`,
+      index: index + 1,
+      status: 'COMPLETED' as const,
+      stage: 'COMPLETED' as const,
+      providerJobId: `mock-provider-${index + 1}`,
+      captionJobId: `mock-caption-${index + 1}`,
+      attempts: 1,
+      cost: 0,
+      validation: { valid: true, width: 1080, height: 1920 },
+      error: null,
+      errorCode: null,
+      retryable: false,
+      videoUrl: null,
+      downloadUrl: null,
+    }));
+    const progress: GenerationProgress = {
+      jobId: 'mock-job-001',
+      status: 'PROCESSING',
+      stage: 'VIDEO_GENERATION',
+      elapsedSeconds: 1,
+      message: '목 후보 영상을 준비하고 있습니다.',
+      candidateCount: options.outputCount,
+      completedCandidates: 0,
+      failedCandidates: 0,
+      visualMode: options.visualMode,
+      influencerReferenceCount:
+        options.visualMode === 'model_included'
+          ? options.influencerImageUrls.filter((url) => url.trim()).slice(0, 2).length
+          : 0,
+      candidates: candidates.map((candidate) => ({
+        ...candidate,
+        status: 'PROCESSING' as const,
+        stage: 'VIDEO_GENERATION' as const,
+      })),
+    };
+    onProgress?.(progress);
     await delay(900);
     return {
       jobId: 'mock-job-001',
       status: 'COMPLETED',
-      videoUrl: null,
-      downloadUrl: null,
-      s3ObjectKey: 'outputs/mock-job-001/final.mp4',
+      candidateCount: options.outputCount,
+      completedCandidates: options.outputCount,
+      failedCandidates: 0,
+      visualMode: options.visualMode,
+      influencerReferenceCount:
+        options.visualMode === 'model_included'
+          ? options.influencerImageUrls.filter((url) => url.trim()).slice(0, 2).length
+          : 0,
+      candidates,
     };
+  },
+
+  async retryCandidate() {
+    await delay(200);
+    throw new Error('목 모드에서는 후보를 재시도하지 않습니다.');
+  },
+
+  async resumeGeneration() {
+    await delay(200);
+    throw new Error('목 모드에서는 기존 backend 작업을 다시 불러오지 않습니다.');
   },
 
   async renewVideoUrl() {
