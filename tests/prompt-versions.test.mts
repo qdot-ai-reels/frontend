@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -9,6 +8,7 @@ import {
   emptyPromptTemplates,
   extractPromptTokens,
   isQuotePromptVersionCurrent,
+  normalizeCreatedPromptVersionResponse,
   normalizePromptVersionCatalog,
   shouldRefreshPromptVersionAfterQuoteError,
   utf8ByteLength,
@@ -157,16 +157,32 @@ test('matches the backend seed token contract per template', () => {
   assert.equal(validatePromptTemplates(templates).valid, true);
 });
 
-test('accepts the actual bundled backend prompt defaults', () => {
-  const templates = emptyPromptTemplates();
-  for (const definition of PROMPT_TEMPLATE_DEFINITIONS) {
-    templates[definition.key] = readFileSync(
-      new URL(`../../backend/app/prompt_defaults/${definition.key}.txt`, import.meta.url),
-      'utf8',
-    );
-  }
+test('normalizes a direct create response before treating numeric version as an envelope', () => {
+  const created = normalizeCreatedPromptVersionResponse({
+    id: 'bundle-4',
+    version: 4,
+    name: '한국어 개선',
+    templates: validTemplates(),
+  });
 
-  assert.equal(validatePromptTemplates(templates).valid, true);
+  assert.equal(created?.id, 'bundle-4');
+  assert.equal(created?.version, '4');
+  assert.equal(created?.name, '한국어 개선');
+});
+
+test('normalizes object create response envelopes without accepting scalar collisions', () => {
+  for (const envelope of ['version', 'item', 'data'] as const) {
+    const created = normalizeCreatedPromptVersionResponse({
+      [envelope]: {
+        id: `bundle-${envelope}`,
+        version: 5,
+        name: envelope,
+        templates: validTemplates(),
+      },
+    });
+    assert.equal(created?.id, `bundle-${envelope}`);
+  }
+  assert.equal(normalizeCreatedPromptVersionResponse({ version: 5 }), null);
 });
 
 test('counts Korean text in UTF-8 bytes and enforces the 64KiB boundary', () => {

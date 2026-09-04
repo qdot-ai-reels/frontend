@@ -162,6 +162,20 @@ export function normalizePromptVersion(value: unknown): PromptVersion | null {
   };
 }
 
+export function normalizeCreatedPromptVersionResponse(value: unknown): PromptVersion | null {
+  const direct = normalizePromptVersion(value);
+  if (direct) return direct;
+
+  const raw = asRecord(value);
+  for (const key of ['version', 'item', 'data'] as const) {
+    const candidate = raw[key];
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const normalized = normalizePromptVersion(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 export function normalizePromptVersionReference(value: unknown): PromptVersionReference | null {
   const raw = asRecord(value);
   const nested = asRecord(

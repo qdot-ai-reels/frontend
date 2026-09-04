@@ -1,6 +1,6 @@
 import { activeInfluencerReferenceUrls } from './influencer-references';
 import {
-  normalizePromptVersion,
+  normalizeCreatedPromptVersionResponse,
   normalizePromptVersionCatalog,
   normalizePromptVersionReference,
 } from './prompt-versions';
@@ -776,14 +776,7 @@ export const studioApi = {
     } catch {
       throw new Error('서버가 저장된 프롬프트 버전 JSON을 반환하지 않았습니다.');
     }
-    const normalized = normalizePromptVersion(
-      firstDefined(
-        asRecord(payload).version,
-        asRecord(payload).item,
-        asRecord(payload).data,
-        payload,
-      ),
-    );
+    const normalized = normalizeCreatedPromptVersionResponse(payload);
     if (!normalized) throw new Error('서버가 저장된 프롬프트 버전을 올바르게 반환하지 않았습니다.');
     return normalized;
   },
