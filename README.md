@@ -51,6 +51,8 @@ NEXT_PUBLIC_INFLUENCER_REFERENCE_URLS=https://example.com/person-front.png,https
 6. `COMPLETED`, `PARTIAL_COMPLETED`, `FAILED`에서 자동 polling을 멈춥니다.
 7. 실패 후보만 candidate retry API로 다시 요청하며, retry 자체는 사용자의 명시적 클릭에서만 실행됩니다.
 
+화면에 내장된 canonical fallback 템플릿은 API 장애 시 선택 구조를 설명하기 위한 offline display 전용입니다. fallback을 보고 있어도 fresh server quote를 받기 전에는 최종 생성 CTA가 활성화되지 않으며, frontend가 임의 비용이나 유효한 quote를 만들지 않습니다.
+
 견적은 backend가 반환한 값만 표시합니다. 현재 `coverage=video_only`인 경우 provider 영상 비용만 포함된다는 문구를 그대로 노출하며, TTS·스토리지·전송·운영비를 총 production 원가로 오인하지 않도록 구분합니다.
 
 ## Production 에셋 경계

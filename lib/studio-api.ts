@@ -55,62 +55,63 @@ const GENERATION_STAGES = new Set<GenerationStage>([
 
 export const LOCAL_TEMPLATE_FALLBACKS: GenerationTemplate[] = [
   {
-    id: 'quick-hook-4',
-    version: '1.0',
-    name: '4초 Quick Hook',
+    id: 'ugc_quick_4',
+    version: '1',
+    name: '4초 초압축',
     shortName: 'Quick Hook',
-    description: '상품을 즉시 보여주고 한 문장 CTA로 끝내는 초압축형',
+    description: '상품을 즉시 보여주고 핵심 장점과 CTA만 빠르게 전달합니다.',
     durationSeconds: 4,
     scenes: [
-      scene('hook', '모델 + 상품 Hook', 0, 1, '첫 화면에서 상품과 핵심 인상을 전달'),
-      scene('product', '제품 소개', 1, 3, '핵심 특징 한 가지를 짧게 설명'),
-      scene('cta', 'CTA', 3, 4, '다음 행동을 한 문장으로 안내'),
+      scene('hook', 'Hook', 0, 1.2, '첫 화면에서 상품과 핵심 인상을 전달'),
+      scene('product', 'Product', 1.2, 2.8, '핵심 특징 한 가지를 짧게 설명'),
+      scene('cta', 'CTA', 2.8, 4, '다음 행동을 한 문장으로 안내'),
     ],
     supported: true,
     unavailableReason: null,
   },
   {
-    id: 'compact-pitch-6',
-    version: '1.0',
-    name: '6초 Compact Pitch',
+    id: 'ugc_quick_6',
+    version: '1',
+    name: '6초 빠른 소개',
     shortName: 'Compact Pitch',
-    description: 'Hook과 핵심 효익을 빠르게 연결하는 짧은 전환형',
+    description: '짧은 Hook 뒤 제품과 사용 장면, CTA를 한 번에 구성합니다.',
     durationSeconds: 6,
     scenes: [
-      scene('hook', '모델 + 상품 Hook', 0, 1.5, '첫 장면에서 시선을 확보'),
-      scene('product', '제품 소개', 1.5, 4, '제품 사용 이유를 간결하게 전달'),
-      scene('cta', 'CTA', 4, 6, '구매 또는 확인 행동을 유도'),
+      scene('hook', 'Hook', 0, 1.5, '첫 장면에서 시선을 확보'),
+      scene('product', 'Product', 1.5, 3.5, '제품 사용 이유를 간결하게 전달'),
+      scene('lifestyle', 'Lifestyle', 3.5, 4.8, '사용 장면과 분위기를 보여줌'),
+      scene('cta', 'CTA', 4.8, 6, '구매 또는 확인 행동을 유도'),
     ],
     supported: true,
     unavailableReason: null,
   },
   {
-    id: 'product-story-8',
-    version: '1.0',
-    name: '8초 Product Story',
+    id: 'ugc_balanced_8',
+    version: '1',
+    name: '8초 균형형',
     shortName: 'Product Story',
-    description: '제품 소개에 실제 사용 맥락을 더하는 균형형',
+    description: 'Hook, 제품 설명, 사용 분위기와 CTA를 균형 있게 보여줍니다.',
     durationSeconds: 8,
     scenes: [
-      scene('hook', '모델 + 상품 Hook', 0, 2, '상품과 문제 상황을 즉시 제시'),
-      scene('product', '제품 소개', 2, 5, '형태와 핵심 장점을 설명'),
-      scene('lifestyle', '사용 분위기', 5, 6.5, '사용 장면과 분위기를 보여줌'),
+      scene('hook', 'Hook', 0, 2, '상품과 문제 상황을 즉시 제시'),
+      scene('product', 'Product', 2, 4.5, '형태와 핵심 장점을 설명'),
+      scene('lifestyle', 'Lifestyle', 4.5, 6.5, '사용 장면과 분위기를 보여줌'),
       scene('cta', 'CTA', 6.5, 8, '다음 행동을 명확히 안내'),
     ],
     supported: true,
     unavailableReason: null,
   },
   {
-    id: 'full-story-15',
-    version: '1.0',
-    name: '15초 Full Story',
+    id: 'ugc_full_15',
+    version: '1',
+    name: '15초 풀 스토리',
     shortName: 'Full Story',
-    description: 'Hook부터 사용 맥락과 CTA까지 완결하는 production 기본형',
+    description: '모델과 상품 Hook부터 제품, 생활 장면, CTA까지 완결형으로 구성합니다.',
     durationSeconds: 15,
     scenes: [
-      scene('hook', '모델 + 상품 Hook', 0, 3, '모델과 상품을 함께 보여주며 주목 확보'),
-      scene('product', '제품 소개', 3, 8, '제품 형태와 핵심 효익 설명'),
-      scene('lifestyle', '사용 분위기', 8, 12, '일상 속 사용 장면을 자연스럽게 표현'),
+      scene('hook', 'Hook', 0, 3, '모델과 상품을 함께 보여주며 주목 확보'),
+      scene('product', 'Product', 3, 8, '제품 형태와 핵심 효익 설명'),
+      scene('lifestyle', 'Lifestyle', 8, 12, '일상 속 사용 장면을 자연스럽게 표현'),
       scene('cta', 'CTA', 12, 15, '링크 확인 등 구체적인 행동 유도'),
     ],
     supported: true,
@@ -144,6 +145,11 @@ function firstDefined(...values: unknown[]): unknown {
 
 function asString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function asVersion(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return asString(value);
 }
 
 function asNumber(value: unknown): number | null {
@@ -239,7 +245,7 @@ function normalizeTemplate(value: unknown, index: number): GenerationTemplate | 
   const supported = asBoolean(firstDefined(item.supported, item.available, item.enabled));
   return {
     id: asString(firstDefined(item.template_id, item.id)) ?? fallback?.id ?? `template-${index + 1}`,
-    version: asString(firstDefined(item.template_version, item.version)) ?? fallback?.version ?? '1.0',
+    version: asVersion(firstDefined(item.template_version, item.version)) ?? fallback?.version ?? '1',
     name: asString(firstDefined(item.name, item.title)) ?? fallback?.name ?? `${duration}초 템플릿`,
     shortName: asString(firstDefined(item.short_name, item.shortName)) ?? fallback?.shortName ?? `${duration}초`,
     description: asString(item.description) ?? fallback?.description ?? '',
@@ -350,7 +356,7 @@ function normalizeTemplateSnapshot(value: unknown, fallback: JsonRecord): JobTem
   const scenes = asArray(rawScenes).map(normalizeScene).filter((scene) => scene.endSeconds > scene.startSeconds);
   return {
     id: asString(firstDefined(item.template_id, item.id, fallback.template_id)),
-    version: asString(firstDefined(item.template_version, item.version, fallback.template_version)),
+    version: asVersion(firstDefined(item.template_version, item.version, fallback.template_version)),
     name: asString(firstDefined(item.name, item.title)) ?? known?.name ?? (duration ? `${duration}초 템플릿` : '템플릿 정보 없음'),
     durationSeconds: duration,
     scenes: scenes.length > 0 ? scenes : known?.scenes ?? [],

@@ -37,7 +37,7 @@ StudioShell
 ### 생성 위저드
 
 1. **상품**: production allowlist만 노출하고 대표 단품 에셋 경계를 함께 표시한다.
-2. **영상 전략**: backend가 반환한 versioned 4/6/8/15초 radio card와 구간 비율을 표시한다. 로컬 fallback은 구조 미리보기뿐이며 서버 연결 없이는 생성할 수 없다.
+2. **영상 전략**: backend가 반환한 versioned 4/6/8/15초 radio card와 구간 비율을 표시한다. canonical 로컬 fallback은 API 장애 시 구조를 설명하는 offline display 전용이며, fresh server quote 없이는 생성 CTA를 활성화하지 않는다.
 3. **크리에이티브**: AI 가상 모델, 상품만, 지정 모델을 명시적으로 선택하고 CTA·광고 목적·채널·후보 수를 입력한다.
 4. **비용 확인**: 서버 quote의 expected/max USD, line item, coverage, disclaimer, 만료 시각을 표시한다.
 
