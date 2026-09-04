@@ -2,7 +2,7 @@
 
 ## 목표와 비목표
 
-이 화면은 한 번의 긴 브라우저 세션에 의존하지 않고 영상 작업을 생성·복구·검토하는 운영 콘솔이다. 사용자는 비용의 상한을 확인한 뒤 한 번만 생성 요청을 보내고, 이후 작업은 job ID를 기준으로 언제든 다시 연다.
+이 화면은 한 번의 긴 브라우저 세션에 의존하지 않고 영상 작업을 생성·복구·검토하는 운영 콘솔이다. 사용자는 영상 provider 예상 범위를 확인한 뒤 한 번만 생성 요청을 보내고, 이후 작업은 job ID를 기준으로 언제든 다시 연다. 예상 범위 상단은 결제 승인이나 강제 상한이 아니다.
 
 다음은 frontend가 보장하지 않는 항목이다.
 
@@ -28,7 +28,7 @@ StudioShell
 ### 영상 라이브러리
 
 - 전체·진행 중·사용 가능·확인 필요·조회 작업 실제 비용을 상단에서 요약한다.
-- 상품명/작업 ID 검색, 상태, 4/6/8/15초 필터를 URL query에 보존한다.
+- 상품명/작업 ID 검색, 상태, 4/6/8/15초 필터를 URL query에 보존한다. 상태는 서버 전체에 적용하고 검색·길이는 현재까지 불러온 cursor 페이지에만 적용된다고 표시한다.
 - 서버 cursor로 더 불러오며 작업 ID 기준으로 중복을 제거한다.
 - 진행 중 작업이 있을 때만 4초 간격으로 갱신한다.
 - 탭이 숨겨졌거나 오프라인이면 요청을 보내지 않고, 복귀 시 즉시 재개한다.
@@ -39,21 +39,21 @@ StudioShell
 1. **상품**: production allowlist만 노출하고 대표 단품 에셋 경계를 함께 표시한다.
 2. **영상 전략**: backend가 반환한 versioned 4/6/8/15초 radio card와 구간 비율을 표시한다. canonical 로컬 fallback은 API 장애 시 구조를 설명하는 offline display 전용이며, fresh server quote 없이는 생성 CTA를 활성화하지 않는다.
 3. **크리에이티브**: AI 가상 모델, 상품만, 지정 모델을 명시적으로 선택하고 CTA·광고 목적·채널·후보 수를 입력한다.
-4. **비용 확인**: 서버 quote의 expected/max USD, line item, coverage, disclaimer, 만료 시각을 표시한다.
+4. **비용 확인**: 서버 quote의 provider expected/range USD, line item, coverage, disclaimer, 만료 시각을 표시한다. TTS·렌더·저장·재시도 비용 제외를 고정 안내한다.
 
 설정이 바뀌면 quote ID와 생성 가능 상태를 즉시 폐기한다. 350ms debounce 뒤 서버 견적을 다시 요청하며, 만료되면 자동 갱신한다. fresh quote와 필수 입력이 모두 있고 잔액 정보가 충분할 때만 최종 CTA를 활성화한다.
 
-최종 CTA는 `client_request_id`를 생성 요청 동안 유지하고 같은 값을 `Idempotency-Key`에도 보낸다. 네트워크 응답이 불확실해도 사용자는 중복 생성 대신 같은 요청을 재확인한다. 202 응답의 job ID를 받으면 즉시 상세로 이동한다.
+최종 CTA는 `client_request_id`를 생성 요청 동안 유지하고 같은 값을 `Idempotency-Key`에도 보낸다. 전송 직전에 sessionStorage에 pending ID를 기록하고, 불확실한 응답이나 reload 뒤에는 자동 재전송을 막아 라이브러리 확인을 먼저 요구한다. 같은 탭에 원래 quote가 남아 있을 때만 사용자가 명시적으로 동일 ID 재전송을 준비할 수 있다. 202 응답의 job ID를 받으면 pending 기록을 지우고 즉시 상세로 이동한다.
 
 ### 작업 상세와 후보 리뷰
 
 - job ID 하나만으로 product/template/options/cost/script/candidates를 복구한다.
 - 3.5초 기본 polling, 실패 시 최대 30초 지수 backoff, AbortController, visibility/online 재개를 사용한다.
 - 마지막으로 성공한 응답을 유지하고 stale/offline/error를 각각 안내한다.
-- 작업 단계, 후보 완료율, 오류, 예상/최대/실제 비용을 분리한다.
-- script 또는 template timeline을 정확한 초 구간으로 표시하고, 서버 timing validation이 있으면 장면별 결과를 붙인다.
+- 작업 단계, 후보 완료율, 오류, provider 예상 범위/실제 비용을 분리한다.
+- 저장된 실제 script를 우선 표시하고, 없으면 exact template ID·version이 일치하는 timeline만 참고용으로 표시한다. 길이 기반 fallback을 서버 확정 내용으로 표시하지 않는다.
 - 후보는 실제 video를 inline 재생하고 기술 점수·해상도·길이·fps·codec·시도·비용을 표시한다.
-- 완료 후보는 선택·다운로드, retryable 실패 후보는 개별 재시도한다.
+- 완료 후보는 선택·다운로드한다. 실패 후보의 유료 retry는 견적·멱등 계약이 없으므로 차단하고 fresh quote가 필요한 새 작업으로 안내한다.
 - “같은 설정으로 새 후보 만들기”는 설정 복사임을 명시하고 동일 영상 보장을 약속하지 않는다.
 
 ## 컴포넌트와 상태 경계
@@ -65,10 +65,10 @@ StudioShell
 | `studio-api` | snake/camel/legacy 응답 방어적 정규화, URL 및 비용 포맷 | backend JSON |
 | `VideoLibrary` | 필터, cursor merge, 활성 작업 refresh | list endpoint + URL query |
 | `CreateWizard` | draft, quote freshness, request id, submit state | user input + template/quote endpoints |
-| `JobDetailClient` | polling lifecycle, stale recovery, selection/retry | job detail endpoint |
-| `VideoCandidateGallery` | candidate playback, QC metadata, download/retry controls | normalized candidates |
+| `JobDetailClient` | polling lifecycle, stale recovery, candidate selection | job detail endpoint |
+| `VideoCandidateGallery` | candidate playback, QC metadata, download controls | normalized candidates |
 
-목록과 상세는 backend 영속 상태가 source of truth다. sessionStorage에는 진행 요청 힌트만 저장하며 복구의 필수 조건으로 사용하지 않는다.
+목록과 상세는 backend 영속 상태가 source of truth다. sessionStorage pending 기록은 조회 API가 없는 동안 중복 유료 재전송을 막는 안전 잠금으로만 사용한다.
 
 ## 반응형·접근성 기준
 
@@ -87,14 +87,14 @@ StudioShell
 | --- | --- | --- |
 | 영상 관리 목록 | `/videos`, 영속 list API, cursor, 요약 카드 | 새로고침 후 동일 작업 노출 |
 | 검색·상태·길이 필터 | URL query + 방어적 client filter | 필터 후 URL/empty state 확인 |
-| 생성 전 비용 | fresh server quote expected/max | 설정 변경 시 CTA 즉시 비활성화 |
+| 생성 전 비용 | fresh server quote provider 예상 범위 | 설정 변경 시 CTA 즉시 비활성화 |
 | 4/6/8/15초 선택 | server versioned template radio/timeline | 네 길이와 version 표시 |
 | 15초 구간 | 0–3 Hook, 3–8 소개, 8–12 분위기, 12–15 CTA | 15초 card/review/detail 확인 |
 | one-click 생성 | template/quote/request ID 기반 POST | script 사전 생성 없이 202 상세 이동 |
-| 중복 제출 방지 | submit lock + stable request/idempotency key | 네트워크 오류 후 동일 ID 재시도 |
+| 중복 제출 방지 | full-form lock + pending session record + stable request/idempotency key | 불확실 응답/reload 뒤 자동 재전송 차단 |
 | 비동기 완료 | job detail polling, terminal stop | 창 재접속 후 job ID 복구 |
 | 오프라인/숨김 탭 | polling pause, reconnect resume | DevTools offline/visibility 전환 |
-| 후보 리뷰 | playback/QC/select/download/retry | 완료·실패 후보 action 확인 |
+| 후보 리뷰 | playback/QC/select/download + 유료 retry 차단 | 완료·실패 후보 action 확인 |
 | 과거 job 호환 | `/` legacy redirect, detail job-only | `/?job=...&product_id=...` 이동 확인 |
 | 에셋 의미 경계 | create/review/detail caveat | 30포 상품에서 단품/작은 글자 경고 확인 |
 | 오류·빈·로딩 | route + in-view 상태 구분 | API 404/500/empty 시나리오 |

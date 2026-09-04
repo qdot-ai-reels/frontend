@@ -1,9 +1,13 @@
 import { activeInfluencerReferenceUrls } from './influencer-references';
+import {
+  normalizeStudioScript,
+  parseApiDate,
+  resolveSafeMediaUrl,
+} from './studio-normalization';
 import type {
   CandidateValidationMetadata,
   GenerationJobStatus,
   GenerationStage,
-  ScriptDocument,
   VideoCandidate,
   VisualMode,
 } from '@/types/reels';
@@ -28,6 +32,10 @@ import type {
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ??
   'http://localhost:8000';
+
+const DEFAULT_BACKEND_VIDEO_MODEL_ID = 'bytedance/seedance-2.0';
+const PUBLIC_VIDEO_MODEL_ID =
+  process.env.NEXT_PUBLIC_VIDEO_MODEL_ID?.trim() || DEFAULT_BACKEND_VIDEO_MODEL_ID;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -183,28 +191,42 @@ function apiUrl(path: string): string {
   return new URL(path, `${API_BASE_URL}/`).toString();
 }
 
-function mediaUrl(value: unknown): string | null {
-  const raw = asString(value);
-  if (!raw) return null;
-  try {
-    return new URL(raw, `${API_BASE_URL}/`).toString();
-  } catch {
-    return null;
+export function safeMediaUrl(value: unknown): string | null {
+  return resolveSafeMediaUrl(value, API_BASE_URL);
+}
+
+export class StudioApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message);
+    this.name = 'StudioApiError';
   }
 }
 
-async function readError(response: Response, fallback: string): Promise<Error> {
+async function readError(response: Response, fallback: string): Promise<StudioApiError> {
+  let message = fallback;
+  let code: string | null = null;
   try {
     const payload = asRecord(await response.json());
     const detail = payload.detail;
-    if (typeof detail === 'string') return new Error(detail);
     const detailRecord = asRecord(detail);
-    const message = asString(firstDefined(detailRecord.message, payload.message, payload.error));
-    if (message) return new Error(message);
+    message =
+      asString(
+        firstDefined(
+          typeof detail === 'string' ? detail : null,
+          detailRecord.message,
+          payload.message,
+          payload.error,
+        ),
+      ) ?? fallback;
+    code = asString(firstDefined(detailRecord.code, payload.code, payload.error_code));
   } catch {
     // Empty and non-JSON provider responses are mapped to a stable user message.
   }
-  return new Error(fallback);
+  return new StudioApiError(message, response.status, code);
 }
 
 function normalizeScene(value: unknown, index: number): TemplateScene {
@@ -237,15 +259,17 @@ function normalizeTemplate(value: unknown, index: number): GenerationTemplate | 
     firstDefined(item.duration_seconds, item.durationSeconds, item.duration),
   );
   if (!isTemplateDuration(duration)) return null;
+  const id = asString(firstDefined(item.template_id, item.id));
+  const version = asVersion(firstDefined(item.template_version, item.version));
   const fallback = LOCAL_TEMPLATE_FALLBACKS.find(
-    (template) => template.durationSeconds === duration,
+    (template) => template.id === id && template.version === version,
   );
   const rawScenes = firstDefined(item.scenes, item.timeline, item.scene_plan);
   const scenes = asArray(rawScenes).map(normalizeScene).filter((item) => item.endSeconds > item.startSeconds);
   const supported = asBoolean(firstDefined(item.supported, item.available, item.enabled));
   return {
-    id: asString(firstDefined(item.template_id, item.id)) ?? fallback?.id ?? `template-${index + 1}`,
-    version: asVersion(firstDefined(item.template_version, item.version)) ?? fallback?.version ?? '1',
+    id: id ?? `template-${index + 1}`,
+    version: version ?? '1',
     name: asString(firstDefined(item.name, item.title)) ?? fallback?.name ?? `${duration}초 템플릿`,
     shortName: asString(firstDefined(item.short_name, item.shortName)) ?? fallback?.shortName ?? `${duration}초`,
     description: asString(item.description) ?? fallback?.description ?? '',
@@ -322,8 +346,8 @@ function normalizeCandidate(
     error: asString(item.error),
     errorCode: asString(firstDefined(item.error_code, item.errorCode)),
     retryable: asBoolean(item.retryable) ?? status === 'FAILED',
-    videoUrl: mediaUrl(firstDefined(item.video_url, item.videoUrl)),
-    downloadUrl: mediaUrl(firstDefined(item.download_url, item.downloadUrl)),
+    videoUrl: safeMediaUrl(firstDefined(item.video_url, item.videoUrl)),
+    downloadUrl: safeMediaUrl(firstDefined(item.download_url, item.downloadUrl)),
   };
 }
 
@@ -335,7 +359,7 @@ function normalizeProduct(value: unknown, fallback: JsonRecord): StudioProductSn
     productId: asString(firstDefined(source.product_id, source.productId, source.id, fallback.product_id)),
     name: asString(firstDefined(source.name, source.product_name, fallback.name)) ?? '상품 정보 없음',
     eventName: asString(firstDefined(source.event_name, source.eventName, fallback.event_name)),
-    imageUrl: mediaUrl(
+    imageUrl: safeMediaUrl(
       firstDefined(source.image_url, source.imageUrl, source.thumbnail_url, fallback.image_url),
     ),
   };
@@ -343,6 +367,8 @@ function normalizeProduct(value: unknown, fallback: JsonRecord): StudioProductSn
 
 function normalizeTemplateSnapshot(value: unknown, fallback: JsonRecord): JobTemplateSnapshot {
   const item = asRecord(value);
+  const id = asString(firstDefined(item.template_id, item.id, fallback.template_id));
+  const version = asVersion(firstDefined(item.template_version, item.version, fallback.template_version));
   const duration = asNumber(
     firstDefined(
       item.duration_seconds,
@@ -351,15 +377,22 @@ function normalizeTemplateSnapshot(value: unknown, fallback: JsonRecord): JobTem
       fallback.max_duration_seconds,
     ),
   );
-  const known = LOCAL_TEMPLATE_FALLBACKS.find((template) => template.durationSeconds === duration);
+  const known = LOCAL_TEMPLATE_FALLBACKS.find(
+    (template) => template.id === id && template.version === version,
+  );
   const rawScenes = firstDefined(item.scenes, item.timeline, fallback.scene_plan);
   const scenes = asArray(rawScenes).map(normalizeScene).filter((scene) => scene.endSeconds > scene.startSeconds);
   return {
-    id: asString(firstDefined(item.template_id, item.id, fallback.template_id)),
-    version: asVersion(firstDefined(item.template_version, item.version, fallback.template_version)),
-    name: asString(firstDefined(item.name, item.title)) ?? known?.name ?? (duration ? `${duration}초 템플릿` : '템플릿 정보 없음'),
+    id,
+    version,
+    name:
+      asString(firstDefined(item.name, item.title)) ??
+      known?.name ??
+      (duration ? `${duration}초 이전 작업` : '템플릿 정보 없음'),
     durationSeconds: duration,
     scenes: scenes.length > 0 ? scenes : known?.scenes ?? [],
+    timelineSource:
+      scenes.length > 0 ? 'server' : known?.scenes.length ? 'versioned-template' : 'unrecorded',
   };
 }
 
@@ -376,12 +409,6 @@ function normalizeOptions(raw: JsonRecord, payload: JsonRecord, candidateCount: 
     mustExclude: asString(firstDefined(raw.must_exclude, payload.must_exclude)),
     extraDetails: asString(firstDefined(raw.extra_details, payload.extra_details)),
   };
-}
-
-function normalizeScript(value: unknown): ScriptDocument | null {
-  const item = asRecord(value);
-  if (!item.summary || !Array.isArray(item.scenes)) return null;
-  return item as unknown as ScriptDocument;
 }
 
 function normalizeTimingValidation(value: unknown): TimingSceneValidation[] {
@@ -466,7 +493,7 @@ export function normalizeJob(value: unknown): StudioJob {
         cost.estimated_expected,
       ),
     ),
-    maxAuthorizedCostUsd: asNumber(
+    estimatedMaxCostUsd: asNumber(
       firstDefined(
         raw.max_authorized_cost_usd,
         raw.max_cost_usd,
@@ -477,7 +504,7 @@ export function normalizeJob(value: unknown): StudioJob {
     actualCostUsd: asNumber(
       firstDefined(raw.actual_cost_usd, cost.actual, raw.total_cost, typeof raw.cost === 'number' ? raw.cost : null),
     ),
-    script: normalizeScript(raw.script),
+    script: normalizeStudioScript(raw.script),
     timingValidation: normalizeTimingValidation(
       firstDefined(raw.timing_validation, raw.audio_timing_validation),
     ),
@@ -492,6 +519,10 @@ export function normalizeJob(value: unknown): StudioJob {
 
 function normalizeSummary(raw: JsonRecord, items: StudioJob[]): GenerationListSummary {
   const summary = asRecord(firstDefined(raw.summary, raw.counts));
+  const summarizedCost = asNumber(
+    firstDefined(summary.actual_cost_usd, summary.cost_usd, summary.total_cost),
+  );
+  const allVisibleCostsKnown = items.length > 0 && items.every((item) => item.actualCostUsd != null);
   return {
     total: asNumber(firstDefined(summary.total, raw.total)) ?? items.length,
     processing:
@@ -504,8 +535,10 @@ function normalizeSummary(raw: JsonRecord, items: StudioJob[]): GenerationListSu
       asNumber(firstDefined(summary.needs_attention, summary.failed, summary.needsAttention)) ??
       items.filter((item) => item.status === 'FAILED' || item.status === 'PARTIAL_COMPLETED').length,
     actualCostUsd:
-      asNumber(firstDefined(summary.actual_cost_usd, summary.cost_usd, summary.total_cost)) ??
-      items.reduce((total, item) => total + (item.actualCostUsd ?? 0), 0),
+      summarizedCost ??
+      (allVisibleCostsKnown
+        ? items.reduce((total, item) => total + (item.actualCostUsd ?? 0), 0)
+        : null),
   };
 }
 
@@ -621,14 +654,38 @@ export const studioApi = {
     return normalizeQuote(await response.json());
   },
 
+  async getVideoProviderCapability(signal?: AbortSignal): Promise<{
+    modelId: string | null;
+    supportsIdentityReference: boolean;
+    known: boolean;
+  }> {
+    let modelId = PUBLIC_VIDEO_MODEL_ID;
+    try {
+      const response = await fetch(apiUrl('/api/v1/settings'), {
+        cache: 'no-store',
+        signal,
+      });
+      if (response.ok) {
+        const payload = asRecord(await response.json());
+        modelId = asString(payload.openrouter_video_model) ?? modelId;
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // A public build-time model ID can still provide a safe capability gate.
+    }
+    return {
+      modelId,
+      supportsIdentityReference: Boolean(modelId?.startsWith('bytedance/seedance-2.')),
+      known: Boolean(modelId),
+    };
+  },
+
   async getGenerations(
     filters: GenerationFilters,
     signal?: AbortSignal,
   ): Promise<GenerationListResult> {
     const params = new URLSearchParams();
-    if (filters.query) params.set('query', filters.query);
     if (filters.status) params.set('status', filters.status);
-    if (filters.duration) params.set('duration', String(filters.duration));
     if (filters.cursor) params.set('cursor', filters.cursor);
     params.set('limit', '24');
     const suffix = params.size > 0 ? `?${params.toString()}` : '';
@@ -656,11 +713,7 @@ export const studioApi = {
       apiUrl(`/api/v1/reels/generate/${encodeURIComponent(jobId)}`),
       { cache: 'no-store', signal },
     );
-    if (!response.ok) {
-      const error = await readError(response, '영상 작업을 불러오지 못했습니다.');
-      Object.assign(error, { status: response.status });
-      throw error;
-    }
+    if (!response.ok) throw await readError(response, '영상 작업을 불러오지 못했습니다.');
     return normalizeJob(await response.json());
   },
 
@@ -710,16 +763,6 @@ export const studioApi = {
     if (!jobId) throw new Error('서버가 생성 작업 ID를 반환하지 않았습니다.');
     return jobId;
   },
-
-  async retryCandidate(jobId: string, candidateId: string): Promise<void> {
-    const response = await fetch(
-      apiUrl(
-        `/api/v1/reels/generate/${encodeURIComponent(jobId)}/candidates/${encodeURIComponent(candidateId)}/retry`,
-      ),
-      { method: 'POST' },
-    );
-    if (!response.ok) throw await readError(response, '실패 후보 재시도를 시작하지 못했습니다.');
-  },
 };
 
 export function createRequestId(): string {
@@ -730,7 +773,7 @@ export function createRequestId(): string {
 }
 
 export function formatUsd(value: number | null): string {
-  if (value == null) return '확인 중';
+  if (value == null) return '미확정';
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -741,8 +784,8 @@ export function formatUsd(value: number | null): string {
 
 export function formatDateTime(value: string | null): string {
   if (!value) return '기록 없음';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
+  const date = parseApiDate(value);
+  if (!date) return '기록 형식 오류';
   return new Intl.DateTimeFormat('ko-KR', {
     dateStyle: 'medium',
     timeStyle: 'short',

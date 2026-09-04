@@ -16,11 +16,17 @@ import {
 } from '@/lib/influencer-references';
 import {
   LOCAL_TEMPLATE_FALLBACKS,
+  StudioApiError,
   assetCaveat,
   createRequestId,
   formatUsd,
   studioApi,
 } from '@/lib/studio-api';
+import {
+  PENDING_SUBMISSION_KEY,
+  isExplicitSubmissionRejection,
+  parsePendingSubmission,
+} from '@/lib/studio-normalization';
 import type { VisualMode } from '@/types/reels';
 import type {
   CreateDraft,
@@ -83,6 +89,27 @@ function isQuoteExpired(quote: GenerationQuote | null): boolean {
   return new Date(quote.expiresAt).getTime() <= Date.now();
 }
 
+function clearPendingSubmission(): void {
+  try {
+    window.sessionStorage.removeItem(PENDING_SUBMISSION_KEY);
+  } catch {
+    // In-memory recovery state remains authoritative for this tab.
+  }
+}
+
+function persistPendingSubmission(value: {
+  clientRequestId: string;
+  quoteId: string;
+  createdAt: string;
+}): boolean {
+  try {
+    window.sessionStorage.setItem(PENDING_SUBMISSION_KEY, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const router = useRouter();
   const [step, setStep] = useState<WizardStep>('product');
@@ -99,7 +126,55 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [copiedFromJob, setCopiedFromJob] = useState(false);
   const [clientRequestId, setClientRequestId] = useState(createRequestId);
+  const [pendingRecovery, setPendingRecovery] = useState<ReturnType<
+    typeof parsePendingSubmission
+  > | null>(null);
+  const [corruptPendingRecovery, setCorruptPendingRecovery] = useState(false);
+  const [pendingReplayArmed, setPendingReplayArmed] = useState(false);
+  const [providerCapability, setProviderCapability] = useState({
+    loading: true,
+    modelId: null as string | null,
+    known: false,
+    supportsIdentityReference: false,
+  });
   const copiedRef = useRef<string | null>(null);
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const raw = window.sessionStorage.getItem(PENDING_SUBMISSION_KEY);
+        const pending = parsePendingSubmission(raw);
+        if (pending) {
+          setClientRequestId(pending.clientRequestId);
+          setPendingRecovery(pending);
+        } else if (raw) {
+          setCorruptPendingRecovery(true);
+        }
+      } catch {
+        setCorruptPendingRecovery(true);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    studioApi
+      .getVideoProviderCapability(controller.signal)
+      .then((capability) => setProviderCapability({ loading: false, ...capability }))
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setProviderCapability({
+            loading: false,
+            modelId: null,
+            known: false,
+            supportsIdentityReference: false,
+          });
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -114,13 +189,19 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           `${messageOf(error)} 아래 구조는 미리보기이며, 서버 견적이 확인되기 전에는 생성할 수 없습니다.`,
         );
       })
-      .finally(() => setTemplatesLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setTemplatesLoading(false);
+      });
     return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    if (!sourceJobId || copiedRef.current === sourceJobId || templatesLoading || !draft) return;
-    copiedRef.current = sourceJobId;
+    if (
+      !sourceJobId ||
+      copiedRef.current === sourceJobId ||
+      templatesLoading ||
+      providerCapability.loading
+    ) return;
     const controller = new AbortController();
     studioApi
       .getGeneration(sourceJobId, controller.signal)
@@ -130,8 +211,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         );
         const template = templates.find(
           (candidate) =>
-            candidate.id === job.template.id ||
-            candidate.durationSeconds === job.template.durationSeconds,
+            candidate.id === job.template.id && candidate.version === job.template.version,
         );
         if (!product || !template) {
           setSubmitError(
@@ -139,12 +219,18 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           );
           return;
         }
+        const cannotRestoreIdentity = job.options.visualMode === 'model_included';
         setDraft((current) => current && ({
           ...current,
           product,
           template,
-          visualMode: job.options.visualMode ?? current.visualMode,
-          outputCount: job.options.candidateCount || current.outputCount,
+          visualMode: cannotRestoreIdentity
+            ? providerCapability.supportsIdentityReference
+              ? 'model_included'
+              : 'generated_model'
+            : job.options.visualMode ?? current.visualMode,
+          influencerImageUrls: cannotRestoreIdentity ? [] : current.influencerImageUrls,
+          outputCount: Math.max(1, Math.min(4, job.options.candidateCount || current.outputCount)),
           channel: job.options.channel ?? current.channel,
           cta: job.options.cta ?? current.cta,
           advertisingPurpose:
@@ -157,19 +243,37 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         setQuoteForSignature(null);
         setClientRequestId(createRequestId());
         setCopiedFromJob(true);
-        setStep('review');
+        copiedRef.current = sourceJobId;
+        if (cannotRestoreIdentity) {
+          setSubmitError(
+            providerCapability.supportsIdentityReference
+              ? '보안상 이전 작업의 인물 레퍼런스 URL은 저장·복제하지 않습니다. 지정 모델 이미지를 다시 입력해 주세요.'
+              : '현재 영상 provider는 지정 모델 identity reference를 지원하지 않아 해당 출연 방식은 복제하지 않았습니다.',
+          );
+          setStep('creative');
+        } else {
+          setStep('review');
+        }
       })
-      .catch((error) => setSubmitError(`이전 설정을 불러오지 못했습니다. ${messageOf(error)}`));
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          copiedRef.current = sourceJobId;
+          setSubmitError(`이전 설정을 불러오지 못했습니다. ${messageOf(error)}`);
+        }
+      });
     return () => controller.abort();
-  }, [draft, sourceJobId, templates, templatesLoading]);
+  }, [providerCapability, sourceJobId, templates, templatesLoading]);
 
   const signature = useMemo(() => (draft ? quoteSignature(draft) : ''), [draft]);
   const canRequestQuote = Boolean(
+    !pendingRecovery &&
+      !corruptPendingRecovery &&
     draft?.template?.supported &&
       draft.cta.trim() &&
       draft.advertisingPurpose.trim() &&
       (draft.visualMode !== 'model_included' ||
-        activeInfluencerReferenceUrls(draft.influencerImageUrls).length > 0),
+        (providerCapability.supportsIdentityReference &&
+          activeInfluencerReferenceUrls(draft.influencerImageUrls).length > 0)),
   );
 
   useEffect(() => {
@@ -231,6 +335,13 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           .find(Boolean) ?? null
       : null;
   const quoteCurrent = quoteForSignature === signature && !isQuoteExpired(quote);
+  const hasPendingRecovery = Boolean(pendingRecovery || corruptPendingRecovery);
+  const canReplayPending = Boolean(
+    pendingRecovery &&
+      quoteCurrent &&
+      quote?.quoteId === pendingRecovery.quoteId &&
+      pendingRecovery.clientRequestId === clientRequestId,
+  );
   const insufficientBalance = Boolean(
     quoteCurrent &&
       quote?.availableBalanceUsd != null &&
@@ -238,6 +349,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   );
 
   function update<Key extends keyof CreateDraft>(key: Key, value: CreateDraft[Key]) {
+    if (submittingRef.current) return;
     setDraft((current) => current && ({ ...current, [key]: value }));
     setQuote(null);
     setQuoteForSignature(null);
@@ -248,12 +360,14 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }
 
   function move(next: WizardStep) {
+    if (submittingRef.current) return;
     setStep(next);
     if (next !== 'review') setQuoteLoading(false);
     window.scrollTo({ top: 0, behavior: 'auto' });
   }
 
   function requestQuoteAgain() {
+    if (submittingRef.current) return;
     setQuote(null);
     setQuoteForSignature(null);
     setQuoteError(null);
@@ -261,7 +375,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }
 
   function nextStep() {
-    if (!draft) return;
+    if (!draft || submittingRef.current) return;
     if (step === 'product') move('template');
     else if (step === 'template' && draft.template) move('creative');
     else if (step === 'creative') {
@@ -270,6 +384,10 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         return;
       }
       if (draft.visualMode === 'model_included') {
+        if (!providerCapability.supportsIdentityReference) {
+          setSubmitError('현재 영상 provider에서는 지정 모델 identity reference를 사용할 수 없습니다.');
+          return;
+        }
         const references = activeInfluencerReferenceUrls(draft.influencerImageUrls);
         if (references.length === 0 || validReferenceError) {
           setSubmitError(validReferenceError || '모델 레퍼런스 URL을 1개 이상 입력해 주세요.');
@@ -281,27 +399,103 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }
 
   async function submitGeneration() {
-    if (!draft || !quote || !quoteCurrent || insufficientBalance || submitting) return;
+    if (
+      !draft ||
+      !quote ||
+      !quoteCurrent ||
+      insufficientBalance ||
+      submittingRef.current ||
+      (pendingRecovery && !pendingReplayArmed) ||
+      corruptPendingRecovery
+    ) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setSubmitError(null);
-    try {
-      window.sessionStorage.setItem(
-        'quedot.pending-generation',
-        JSON.stringify({ clientRequestId, quoteId: quote.quoteId, createdAt: new Date().toISOString() }),
+    const pending = {
+      clientRequestId,
+      quoteId: quote.quoteId,
+      createdAt: new Date().toISOString(),
+    };
+    if (!persistPendingSubmission(pending)) {
+      submittingRef.current = false;
+      setSubmitting(false);
+      setCorruptPendingRecovery(true);
+      setSubmitError(
+        '브라우저가 중복 생성 방지 기록을 저장하지 못해 유료 요청을 보내지 않았습니다. sessionStorage 허용 여부를 확인해 주세요.',
       );
+      return;
+    }
+    try {
       const jobId = await studioApi.startGeneration({
         ...draft,
         quoteId: quote.quoteId,
         clientRequestId,
       });
-      window.sessionStorage.setItem('quedot.last-generation-job', jobId);
+      clearPendingSubmission();
+      setPendingRecovery(null);
+      setCorruptPendingRecovery(false);
+      setPendingReplayArmed(false);
+      try {
+        window.sessionStorage.setItem('quedot.last-generation-job', jobId);
+      } catch {
+        // The durable job ID is already represented by the destination URL.
+      }
       router.push(`/videos/${encodeURIComponent(jobId)}`);
     } catch (error) {
-      setSubmitError(
-        `${messageOf(error)} 같은 요청 ID를 유지하므로 다시 눌러도 중복 작업이 생성되지 않습니다.`,
-      );
+      const status = error instanceof StudioApiError ? error.status : null;
+      const explicitRejection = isExplicitSubmissionRejection(status);
+      const requote =
+        status === 409 ||
+        (error instanceof StudioApiError &&
+          ['QUOTE_EXPIRED', 'QUOTE_MISMATCH', 'QUOTE_STALE', 'IDEMPOTENCY_CONFLICT'].includes(
+            error.code ?? '',
+          ));
+      if (explicitRejection) {
+        clearPendingSubmission();
+        setPendingRecovery(null);
+        setCorruptPendingRecovery(false);
+        setPendingReplayArmed(false);
+        setClientRequestId(createRequestId());
+        if (requote) {
+          setQuote(null);
+          setQuoteForSignature(null);
+          setQuoteError(null);
+          setQuoteNonce((value) => value + 1);
+          const code = error instanceof StudioApiError && error.code ? ` [${error.code}]` : '';
+          setSubmitError(`${messageOf(error)}${code} 최신 조건으로 견적을 다시 계산합니다.`);
+        } else {
+          setSubmitError(messageOf(error));
+        }
+      } else {
+        setPendingRecovery(pending);
+        setPendingReplayArmed(false);
+        setSubmitError(
+          `${messageOf(error)} 접수 여부를 확인할 수 없어 자동 재전송을 막았습니다. 먼저 라이브러리에서 작업을 확인해 주세요.`,
+        );
+      }
+      submittingRef.current = false;
       setSubmitting(false);
     }
+  }
+
+  function prepareSameRequestRetry() {
+    if (!pendingRecovery || pendingRecovery.clientRequestId !== clientRequestId) return;
+    setPendingReplayArmed(true);
+    setSubmitError(
+      '같은 client_request_id로 한 번 더 전송할 준비가 됐습니다. 서버가 이전 요청을 접수했다면 기존 작업만 반환해야 합니다.',
+    );
+  }
+
+  function startFreshAfterRecoveryCheck() {
+    clearPendingSubmission();
+    setPendingRecovery(null);
+    setCorruptPendingRecovery(false);
+    setPendingReplayArmed(false);
+    setQuote(null);
+    setQuoteForSignature(null);
+    setClientRequestId(createRequestId());
+    setSubmitError('새 요청 ID를 준비했습니다. 서버 견적을 다시 확인한 뒤 생성해 주세요.');
+    setQuoteNonce((value) => value + 1);
   }
 
   return (
@@ -318,12 +512,46 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         </div>
       )}
 
+      {hasPendingRecovery && (
+        <div className="recovery-banner" role="alert">
+          <div>
+            <strong>이전 생성 요청의 접수 결과를 확인해야 합니다</strong>
+            <p>
+              응답이 끊긴 요청을 새 ID로 자동 전송하지 않습니다. 먼저 라이브러리에서 작업을 확인해
+              주세요.
+              {pendingRecovery && (
+                <> 요청 ID 끝자리 <code>{pendingRecovery.clientRequestId.slice(-8)}</code></>
+              )}
+            </p>
+          </div>
+          <div className="inline-actions">
+            <Link className="button button-secondary" href="/videos">라이브러리 확인</Link>
+            {canReplayPending && !pendingReplayArmed && (
+              <button className="button button-secondary" type="button" onClick={prepareSameRequestRetry}>
+                같은 요청 ID로 재전송 준비
+              </button>
+            )}
+            {!canReplayPending && (
+              <button className="button button-ghost" type="button" onClick={startFreshAfterRecoveryCheck}>
+                확인 완료 · 새 요청 준비
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {pendingReplayArmed && (
+        <div className="notice-banner warning" role="status">
+          수동 복구 모드입니다. 생성 버튼은 저장된 client_request_id를 그대로 재사용합니다.
+        </div>
+      )}
+
       <ol className="wizard-stepper" aria-label="영상 생성 단계">
         {STEPS.map((item, index) => (
           <li key={item.key} className={index < currentIndex ? 'done' : index === currentIndex ? 'active' : ''}>
             <button
               type="button"
-              disabled={index > currentIndex}
+              disabled={submitting || index > currentIndex}
               onClick={() => index <= currentIndex && move(item.key)}
               aria-current={index === currentIndex ? 'step' : undefined}
             >
@@ -335,7 +563,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       </ol>
 
       <div className="create-layout">
-        <section className="panel create-panel">
+        <section className="panel create-panel" aria-busy={submitting}>
+          <fieldset className="wizard-fieldset" disabled={submitting}>
           {step === 'product' && (
             <ProductStep draft={draft} onProduct={(product) => update('product', product)} caveat={caveat} />
           )}
@@ -349,7 +578,12 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
             />
           )}
           {step === 'creative' && (
-            <CreativeStep draft={draft} update={update} referenceError={validReferenceError} />
+            <CreativeStep
+              draft={draft}
+              update={update}
+              referenceError={validReferenceError}
+              providerCapability={providerCapability}
+            />
           )}
           {step === 'review' && (
             <ReviewStep
@@ -370,6 +604,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               <button type="button" className="button button-secondary" onClick={() => move(STEPS[currentIndex - 1].key)}>
                 이전
               </button>
+            ) : submitting ? (
+              <span className="button button-secondary" aria-disabled="true">취소</span>
             ) : <Link className="button button-secondary" href="/videos">취소</Link>}
             {step !== 'review' ? (
               <button
@@ -384,7 +620,13 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               <button
                 type="button"
                 className="button button-primary button-cost"
-                disabled={!quoteCurrent || quoteLoading || insufficientBalance || submitting}
+                disabled={
+                  !quoteCurrent ||
+                  quoteLoading ||
+                  insufficientBalance ||
+                  submitting ||
+                  (hasPendingRecovery && !pendingReplayArmed)
+                }
                 onClick={submitGeneration}
               >
                 {submitting
@@ -395,6 +637,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               </button>
             )}
           </div>
+          </fieldset>
         </section>
 
         <aside className="create-summary" aria-label="현재 영상 설정 요약">
@@ -504,10 +747,17 @@ function CreativeStep({
   draft,
   update,
   referenceError,
+  providerCapability,
 }: {
   draft: CreateDraft;
   update: <Key extends keyof CreateDraft>(key: Key, value: CreateDraft[Key]) => void;
   referenceError: string | null;
+  providerCapability: {
+    loading: boolean;
+    modelId: string | null;
+    known: boolean;
+    supportsIdentityReference: boolean;
+  };
 }) {
   return (
     <div className="step-content">
@@ -522,18 +772,41 @@ function CreativeStep({
             ['generated_model', 'AI 가상 모델', '실존 인물 레퍼런스 없이 새 모델 생성'],
             ['product_only', '상품만', '검수된 상품 이미지만 사용'],
             ['model_included', '지정 모델', '공개 HTTPS 인물 이미지 1~2개 사용'],
-          ] as const).map(([value, label, description]) => (
-            <label key={value} className={draft.visualMode === value ? 'selected' : ''}>
-              <input
-                type="radio"
-                name="visual-mode"
-                checked={draft.visualMode === value}
-                onChange={() => update('visualMode', value)}
-              />
-              <span><strong>{label}</strong><small>{description}</small></span>
-            </label>
-          ))}
+          ] as const).map(([value, label, description]) => {
+            const identityUnavailable =
+              value === 'model_included' && !providerCapability.supportsIdentityReference;
+            const identityReason = providerCapability.loading
+              ? 'provider 지원 여부 확인 중'
+              : providerCapability.known
+                ? `${providerCapability.modelId} · identity reference 미지원`
+                : 'provider 모델 정보 미확인 · production 안전상 비활성';
+            return (
+              <label
+                key={value}
+                className={`${draft.visualMode === value ? 'selected' : ''} ${identityUnavailable ? 'disabled' : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="visual-mode"
+                  checked={draft.visualMode === value}
+                  disabled={identityUnavailable}
+                  onChange={() => update('visualMode', value)}
+                />
+                <span>
+                  <strong>{label}</strong>
+                  <small>{identityUnavailable ? identityReason : description}</small>
+                </span>
+              </label>
+            );
+          })}
         </div>
+        <p className="capability-note" role="status" aria-live="polite">
+          {providerCapability.loading
+            ? '현재 provider 모델의 identity reference 지원 여부를 확인 중입니다.'
+            : providerCapability.known
+              ? `현재 provider 모델: ${providerCapability.modelId} · identity reference ${providerCapability.supportsIdentityReference ? '지원' : '미지원'}`
+              : '현재 provider 모델 정보를 확인할 수 없어 지정 모델 입력을 production 안전상 비활성화했습니다.'}
+        </p>
       </fieldset>
 
       {draft.visualMode === 'model_included' && (
@@ -543,6 +816,7 @@ function CreativeStep({
               <span>모델 이미지 URL {index + 1}{index === 0 ? ' · 필수' : ' · 선택'}</span>
               <input
                 type="url"
+                maxLength={2048}
                 value={draft.influencerImageUrls[index] ?? ''}
                 placeholder="https://cdn.example.com/model.jpg"
                 aria-invalid={referenceError ? true : undefined}
@@ -561,11 +835,11 @@ function CreativeStep({
       <div className="form-grid">
         <label className="form-field">
           <span>CTA · 필수</span>
-          <input value={draft.cta} placeholder="예: 지금 링크에서 확인하세요" onChange={(event) => update('cta', event.target.value)} />
+          <input maxLength={500} value={draft.cta} placeholder="예: 지금 링크에서 확인하세요" onChange={(event) => update('cta', event.target.value)} />
         </label>
         <label className="form-field">
           <span>광고 목적 · 필수</span>
-          <input value={draft.advertisingPurpose} placeholder="예: 공동구매 전환 유도" onChange={(event) => update('advertisingPurpose', event.target.value)} />
+          <input maxLength={1000} value={draft.advertisingPurpose} placeholder="예: 공동구매 전환 유도" onChange={(event) => update('advertisingPurpose', event.target.value)} />
         </label>
         <label className="form-field">
           <span>노출 채널</span>
@@ -584,9 +858,9 @@ function CreativeStep({
       <details className="advanced-fields">
         <summary>고급 요청사항 <small>선택</small></summary>
         <div className="form-grid">
-          <label className="form-field"><span>꼭 포함</span><input value={draft.mustInclude} onChange={(event) => update('mustInclude', event.target.value)} /></label>
-          <label className="form-field"><span>포함 금지</span><input value={draft.mustExclude} onChange={(event) => update('mustExclude', event.target.value)} /></label>
-          <label className="form-field full"><span>기타 요청</span><input value={draft.extraDetails} onChange={(event) => update('extraDetails', event.target.value)} /></label>
+          <label className="form-field"><span>꼭 포함</span><input maxLength={2000} value={draft.mustInclude} onChange={(event) => update('mustInclude', event.target.value)} /></label>
+          <label className="form-field"><span>포함 금지</span><input maxLength={2000} value={draft.mustExclude} onChange={(event) => update('mustExclude', event.target.value)} /></label>
+          <label className="form-field full"><span>기타 요청</span><textarea maxLength={4000} rows={4} value={draft.extraDetails} onChange={(event) => update('extraDetails', event.target.value)} /></label>
         </div>
       </details>
     </div>
@@ -627,14 +901,15 @@ function ReviewStep({
         ) : quote ? (
           <>
             <div className="quote-totals">
-              <div><span>예상 결제</span><strong>{formatUsd(quote.expectedTotalUsd)}</strong></div>
-              <div><span>최대 예상</span><strong>{formatUsd(quote.maxTotalUsd)}</strong></div>
+              <div><span>Provider 예상값</span><strong>{formatUsd(quote.expectedTotalUsd)}</strong></div>
+              <div><span>Provider 예상 범위 상단</span><strong>{formatUsd(quote.maxTotalUsd)}</strong></div>
               {quote.availableBalanceUsd != null && <div><span>사용 가능 잔액</span><strong>{formatUsd(quote.availableBalanceUsd)}</strong></div>}
             </div>
             {quote.lineItems.length > 0 && <ul className="quote-lines">{quote.lineItems.map((item) => <li key={item.key}><span>{item.label}</span><strong>{formatUsd(item.amountUsd)}</strong></li>)}</ul>}
             {quote.coverage && <p className="quote-coverage">견적 범위: {quote.coverage === 'video_only' ? '영상 provider 비용만 포함' : quote.coverage}</p>}
             {quote.disclaimer && <p className="quote-disclaimer">{quote.disclaimer}</p>}
-            {insufficientBalance && <p className="field-error" role="alert">최대 예상 비용보다 사용 가능 잔액이 적어 생성을 시작할 수 없습니다.</p>}
+            {insufficientBalance && <p className="field-error" role="alert">Provider 예상 범위 상단보다 사용 가능 잔액이 적어 생성을 시작할 수 없습니다. 이 값은 결제 상한 승인이 아닙니다.</p>}
+            <p className="quote-disclaimer">표시 범위는 영상 provider 추정치이며 결제 상한이나 승인 금액이 아닙니다. TTS·렌더링·저장·재시도 비용은 포함하지 않습니다.</p>
             <small>견적 ID {quote.quoteId}{quote.expiresAt ? ` · ${new Date(quote.expiresAt).toLocaleTimeString('ko-KR')}까지 유효` : ''}</small>
           </>
         ) : <p>필수 입력을 완료하면 서버 견적이 표시됩니다.</p>}

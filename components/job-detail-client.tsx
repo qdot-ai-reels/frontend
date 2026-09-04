@@ -2,11 +2,11 @@
 
 import Image from 'next/image';
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { assetCaveat, formatDateTime, formatUsd, studioApi } from '@/lib/studio-api';
 import type { GenerationJobStatus, GenerationStage } from '@/types/reels';
-import type { StudioJob, TemplateScene } from '@/types/studio';
+import type { StudioJob } from '@/types/studio';
 import { isJobActive } from '@/types/studio';
 
 import { VideoCandidateGallery } from './video-candidate-gallery';
@@ -81,11 +81,13 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
   const [stale, setStale] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
-  const [retryingCandidateId, setRetryingCandidateId] = useState<string | null>(null);
-  const [retryError, setRetryError] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
 
-  const refresh = useCallback(() => setRefreshKey((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    setNotFound(false);
+    if (!jobRef.current) setLoading(true);
+    setRefreshKey((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -104,6 +106,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
       setOffline(isOffline);
       if (isOffline || document.visibilityState === 'hidden') {
         setStale(Boolean(jobRef.current));
+        if (isOffline && !jobRef.current) setLoading(false);
         schedule(5_000);
         return;
       }
@@ -134,6 +137,11 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
         if (disposed || controller.signal.aborted) return;
         setLoading(false);
         if (errorStatus(requestError) === 404) {
+          jobRef.current = null;
+          setJob(null);
+          setSelectedCandidateId(null);
+          setError(null);
+          setStale(false);
           setNotFound(true);
           return;
         }
@@ -148,6 +156,8 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
       const isOffline = !navigator.onLine;
       setOffline(isOffline);
       if (!isOffline && document.visibilityState === 'visible') {
+        if (timer != null) window.clearTimeout(timer);
+        timer = null;
         failures = 0;
         void load();
       }
@@ -167,20 +177,6 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
     };
   }, [jobId, refreshKey]);
 
-  async function retryCandidate(candidateId: string) {
-    if (retryingCandidateId) return;
-    setRetryingCandidateId(candidateId);
-    setRetryError(null);
-    try {
-      await studioApi.retryCandidate(jobId, candidateId);
-      refresh();
-    } catch (requestError) {
-      setRetryError(errorMessage(requestError));
-    } finally {
-      setRetryingCandidateId(null);
-    }
-  }
-
   const active = job ? isJobActive(job.status) : false;
   const completedPercent = job
     ? Math.round((job.completedCandidates / Math.max(1, job.candidateCount)) * 100)
@@ -198,6 +194,17 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
         <h1>영상 작업을 찾을 수 없습니다</h1>
         <p>삭제되었거나 잘못된 작업 ID일 수 있습니다. 라이브러리에서 작업을 다시 선택해 주세요.</p>
         <Link className="button button-primary" href="/videos">영상 라이브러리</Link>
+      </section>
+    );
+  }
+
+  if (offline && !job) {
+    return (
+      <section className="route-state">
+        <span className="state-symbol" aria-hidden="true">↯</span>
+        <h1>오프라인이라 작업을 불러올 수 없습니다</h1>
+        <p>연결되면 자동으로 최신 상태를 확인합니다. 서버의 생성 작업은 계속됩니다.</p>
+        <Link className="button button-secondary" href="/videos">라이브러리</Link>
       </section>
     );
   }
@@ -241,7 +248,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
         <div className="detail-actions">
           <button className="button button-secondary" type="button" onClick={refresh}>상태 새로고침</button>
           <Link className="button button-primary" href={`/create?from_job=${encodeURIComponent(job.jobId)}`}>
-            같은 설정으로 새 후보 만들기
+            설정 참고해 새 후보 만들기
           </Link>
         </div>
       </header>
@@ -255,9 +262,6 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
 
       {error && job && (
         <div className="inline-alert" role="alert"><span>{error} 저장된 마지막 상태를 표시합니다.</span><button type="button" onClick={refresh}>다시 연결</button></div>
-      )}
-      {retryError && (
-        <div className="inline-alert" role="alert"><span>{retryError}</span><button type="button" onClick={() => setRetryError(null)}>닫기</button></div>
       )}
       {warning && <div className="asset-caveat" role="note"><strong>상품 에셋 주의</strong><p>{warning}</p></div>}
 
@@ -287,14 +291,18 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
               <VideoCandidateGallery
                 candidates={job.candidates}
                 selectedCandidateId={selectedCandidateId}
-                retryingCandidateId={retryingCandidateId}
                 onSelect={setSelectedCandidateId}
-                onRetry={(candidateId) => void retryCandidate(candidateId)}
               />
             ) : (
               <CandidateWaiting count={job.candidateCount} active={active} />
             )}
-            <p className="candidate-footnote">“같은 설정”은 템플릿과 입력값을 복사합니다. 생성형 영상은 매번 새 후보가 만들어지며 동일한 픽셀 결과를 보장하지 않습니다.</p>
+            {job.candidates.some((candidate) => candidate.status === 'FAILED') && (
+              <div className="notice-banner warning" role="note">
+                후보 재시도는 추가 provider 비용이 발생할 수 있어 이 화면에서 차단했습니다. 같은 설정을
+                참고해 새 후보를 만들고 fresh 견적을 다시 확인해 주세요.
+              </div>
+            )}
+            <p className="candidate-footnote">템플릿 ID·version과 저장된 입력값을 참고해 새 작업을 만듭니다. 보안상 인물 레퍼런스 URL은 복제하지 않습니다. 생성형 영상은 매번 달라지며 동일한 픽셀 결과를 보장하지 않습니다.</p>
           </section>
 
           <ScriptTimeline job={job} />
@@ -305,10 +313,10 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
             <div className="panel-heading compact"><div><h2 id="cost-title">비용</h2><p>USD · 영상 provider 기준</p></div></div>
             <dl className="detail-list">
               <div><dt>예상 비용</dt><dd>{formatUsd(job.estimatedCostUsd)}</dd></div>
-              <div><dt>최대 승인</dt><dd>{formatUsd(job.maxAuthorizedCostUsd)}</dd></div>
+              <div><dt>Provider 예상 범위 상단</dt><dd>{formatUsd(job.estimatedMaxCostUsd)}</dd></div>
               <div className="strong"><dt>실제 기록</dt><dd>{formatUsd(job.actualCostUsd)}</dd></div>
             </dl>
-            <p className="muted-note">견적에는 음성·후처리 등 별도 인프라 비용이 포함되지 않을 수 있습니다.</p>
+            <p className="muted-note">예상 범위는 결제 상한이나 승인이 아닙니다. TTS·렌더링·저장·재시도 비용은 포함하지 않습니다.</p>
           </section>
 
           <section className="panel" aria-labelledby="settings-title">
@@ -329,7 +337,11 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
 }
 
 function StageProgress({ job }: { job: StudioJob }) {
-  const current = stagePosition(job.stage, job.status);
+  const failedCandidateStage = job.candidates.find(
+    (candidate) => candidate.status === 'FAILED' && candidate.stage && candidate.stage !== 'FAILED',
+  )?.stage;
+  const effectiveStage = job.status === 'FAILED' ? failedCandidateStage ?? job.stage : job.stage;
+  const current = stagePosition(effectiveStage, job.status);
   return (
     <ol className="stage-progress" aria-label="영상 생성 단계">
       {STAGES.map((stage, index) => {
@@ -360,35 +372,52 @@ function CandidateWaiting({ count, active }: { count: number; active: boolean })
 }
 
 function ScriptTimeline({ job }: { job: StudioJob }) {
-  const scenes: TemplateScene[] = useMemo(() => {
-    if (job.script?.scenes?.length) {
-      return job.script.scenes.map((scene, index) => ({
-        id: scene.scene_name || `script-${index + 1}`,
-        label: scene.scene_name || `장면 ${index + 1}`,
-        startSeconds: scene.time_range_sec.start,
-        endSeconds: scene.time_range_sec.end,
-        description: scene.auditory?.voiceover || scene.auditory?.subtitle || scene.visual,
+  const hasScript = Boolean(job.script?.scenes.length);
+  const scenes = hasScript
+    ? job.script!.scenes
+    : job.template.scenes.map((scene) => ({
+        ...scene,
+        visual: scene.description || null,
+        voiceover: null,
+        subtitle: null,
+        notes: null,
       }));
-    }
-    return job.template.scenes;
-  }, [job.script, job.template.scenes]);
+  const provenance = hasScript
+    ? '서버 작업에 저장된 실제 스크립트 장면입니다.'
+    : job.template.timelineSource === 'server'
+      ? '서버 작업에 저장된 템플릿 장면입니다. 실제 생성 스크립트 내용은 기록되지 않았습니다.'
+      : job.template.timelineSource === 'versioned-template'
+        ? '저장된 템플릿 ID·version과 일치하는 현재 구조입니다. 실제 생성 스크립트로 확정된 내용은 아닙니다.'
+        : '이 작업에는 스크립트 또는 versioned template 타임라인이 기록되지 않았습니다.';
 
-  if (scenes.length === 0) return null;
   return (
     <section className="panel" aria-labelledby="timeline-title">
-      <div className="panel-heading"><div><h2 id="timeline-title">스크립트 타임라인</h2><p>서버가 확정한 장면 구간과 음성 내용을 확인합니다.</p></div></div>
-      <ol className="script-timeline">
-        {scenes.map((scene, index) => {
-          const validation = job.timingValidation.find((item) => item.id === scene.id) ?? job.timingValidation[index];
-          return (
-            <li key={`${scene.id}-${index}`}>
-              <span className="timeline-time">{scene.startSeconds}–{scene.endSeconds}초</span>
-              <div><strong>{scene.label}</strong><p>{scene.description || '상세 스크립트를 준비하고 있습니다.'}</p></div>
-              {validation?.passed != null && <span className={`validation-badge ${validation.passed ? 'passed' : 'failed'}`}>타이밍 {validation.passed ? '통과' : '확인'}</span>}
-            </li>
-          );
-        })}
-      </ol>
+      <div className="panel-heading"><div><h2 id="timeline-title">스크립트 타임라인</h2><p>{provenance}</p></div></div>
+      {scenes.length > 0 ? (
+        <ol className="script-timeline">
+          {scenes.map((scene, index) => {
+            const validation = job.timingValidation.find((item) => item.id === scene.id) ?? job.timingValidation[index];
+            return (
+              <li key={`${scene.id}-${index}`}>
+                <span className="timeline-time">{scene.startSeconds}–{scene.endSeconds}초</span>
+                <div>
+                  <strong>{scene.label}</strong>
+                  {scene.visual && <p><b>화면</b> {scene.visual}</p>}
+                  {scene.voiceover && <p><b>보이스오버</b> {scene.voiceover}</p>}
+                  {scene.subtitle && <p><b>자막</b> {scene.subtitle}</p>}
+                  {scene.notes && <p><b>메모</b> {scene.notes}</p>}
+                  {!scene.visual && !scene.voiceover && !scene.subtitle && !scene.notes && (
+                    <p>장면 세부 내용 미기록</p>
+                  )}
+                </div>
+                {validation?.passed != null && <span className={`validation-badge ${validation.passed ? 'passed' : 'failed'}`}>타이밍 {validation.passed ? '통과' : '확인'}</span>}
+              </li>
+            );
+          })}
+        </ol>
+      ) : (
+        <p className="timeline-unrecorded">타임라인 미기록</p>
+      )}
     </section>
   );
 }

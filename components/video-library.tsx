@@ -26,7 +26,7 @@ const STATUS_LABELS: Record<GenerationJobStatus, string> = {
 const EMPTY_RESULT: GenerationListResult = {
   items: [],
   nextCursor: null,
-  summary: { total: 0, processing: 0, ready: 0, needsAttention: 0, actualCostUsd: 0 },
+  summary: { total: 0, processing: 0, ready: 0, needsAttention: 0, actualCostUsd: null },
 };
 
 function errorMessage(error: unknown): string {
@@ -41,6 +41,16 @@ function mergeJobs(current: StudioJob[], incoming: StudioJob[]): StudioJob[] {
   );
 }
 
+function mergePages(pages: Map<string, GenerationListResult>): GenerationListResult {
+  const values = Array.from(pages.values());
+  if (values.length === 0) return EMPTY_RESULT;
+  return {
+    items: values.reduce<StudioJob[]>((items, page) => mergeJobs(items, page.items), []),
+    nextCursor: values.at(-1)?.nextCursor ?? null,
+    summary: values[0].summary,
+  };
+}
+
 export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFilters }) {
   const router = useRouter();
   const [filters, setFilters] = useState(initialFilters);
@@ -48,8 +58,12 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const latestRequest = useRef(0);
+  const pagesRef = useRef<Map<string, GenerationListResult>>(new Map());
+  const loadMoreController = useRef<AbortController | null>(null);
+  const canonicalizedUrl = useRef(false);
 
   const updateUrl = useCallback(
     (next: GenerationFilters) => {
@@ -66,32 +80,43 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
 
   const setFilter = useCallback(
     <Key extends keyof GenerationFilters>(key: Key, value: GenerationFilters[Key]) => {
-      setFilters((current) => {
-        const next = { ...current, [key]: value, cursor: undefined };
-        updateUrl(next);
-        return next;
-      });
+      const next = { ...filters, [key]: value, cursor: undefined };
+      setFilters(next);
+      updateUrl(next);
     },
-    [updateUrl],
+    [filters, updateUrl],
   );
+
+  useEffect(() => {
+    if (canonicalizedUrl.current) return;
+    canonicalizedUrl.current = true;
+    updateUrl(initialFilters);
+  }, [initialFilters, updateUrl]);
 
   useEffect(() => {
     let disposed = false;
     let timer: number | null = null;
     let controller: AbortController | null = null;
     const requestId = ++latestRequest.current;
+    pagesRef.current = new Map();
+    loadMoreController.current?.abort();
 
     async function load() {
       if (document.visibilityState === 'hidden' || !navigator.onLine) {
+        const isOffline = !navigator.onLine;
+        setOffline(isOffline);
+        if (isOffline) setLoading(false);
         timer = window.setTimeout(load, 5_000);
         return;
       }
+      setOffline(false);
       controller?.abort();
       controller = new AbortController();
       try {
         const next = await studioApi.getGenerations(filters, controller.signal);
         if (disposed || requestId !== latestRequest.current) return;
-        setResult(next);
+        pagesRef.current.set('root', next);
+        setResult(mergePages(pagesRef.current));
         setError(null);
         setLoading(false);
         if (next.items.some((job) => isJobActive(job.status))) {
@@ -106,8 +131,14 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
     }
 
     const debounce = filters.query ? 300 : 0;
-    timer = window.setTimeout(load, debounce);
+    timer = window.setTimeout(() => {
+      setResult(EMPTY_RESULT);
+      setLoading(true);
+      setLoadingMore(false);
+      void load();
+    }, debounce);
     const resume = () => {
+      setOffline(!navigator.onLine);
       if (document.visibilityState === 'visible' && navigator.onLine) {
         if (timer != null) window.clearTimeout(timer);
         void load();
@@ -115,30 +146,41 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
     };
     document.addEventListener('visibilitychange', resume);
     window.addEventListener('online', resume);
+    window.addEventListener('offline', resume);
     return () => {
       disposed = true;
       controller?.abort();
       if (timer != null) window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', resume);
       window.removeEventListener('online', resume);
+      window.removeEventListener('offline', resume);
     };
   }, [filters, refreshKey]);
 
   async function loadMore() {
     if (!result.nextCursor || loadingMore) return;
+    const cursor = result.nextCursor;
+    const requestId = latestRequest.current;
+    loadMoreController.current?.abort();
+    const controller = new AbortController();
+    loadMoreController.current = controller;
     setLoadingMore(true);
     setError(null);
     try {
-      const next = await studioApi.getGenerations({ ...filters, cursor: result.nextCursor });
-      setResult((current) => ({
-        ...next,
-        items: mergeJobs(current.items, next.items),
-        summary: current.summary,
-      }));
+      const next = await studioApi.getGenerations(
+        { ...filters, cursor },
+        controller.signal,
+      );
+      if (requestId !== latestRequest.current || controller.signal.aborted) return;
+      pagesRef.current.set(cursor, next);
+      setResult(mergePages(pagesRef.current));
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (!controller.signal.aborted) setError(errorMessage(requestError));
     } finally {
-      setLoadingMore(false);
+      if (loadMoreController.current === controller) {
+        loadMoreController.current = null;
+        setLoadingMore(false);
+      }
     }
   }
 
@@ -155,7 +197,10 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
       needsAttention: result.items.filter(
         (job) => job.status === 'FAILED' || job.status === 'PARTIAL_COMPLETED',
       ).length,
-      actualCostUsd: result.items.reduce((sum, job) => sum + (job.actualCostUsd ?? 0), 0),
+      actualCostUsd:
+        result.items.length > 0 && result.items.every((job) => job.actualCostUsd != null)
+          ? result.items.reduce((sum, job) => sum + (job.actualCostUsd ?? 0), 0)
+          : null,
     }),
     [result.items],
   );
@@ -176,7 +221,7 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
         <SummaryCard label="진행 중" value={`${visibleSummary.processing}개`} accent={activeJobs > 0} />
         <SummaryCard label="사용 가능" value={`${visibleSummary.ready}개`} tone="success" />
         <SummaryCard label="확인 필요" value={`${visibleSummary.needsAttention}개`} tone="danger" />
-        <SummaryCard label="조회 작업 비용" value={formatUsd(visibleSummary.actualCostUsd)} />
+        <SummaryCard label="표시 작업 실제 비용" value={formatUsd(visibleSummary.actualCostUsd)} />
       </section>
 
       <section className="panel library-panel" aria-labelledby="library-title">
@@ -205,6 +250,7 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
               onChange={(event) => setFilter('status', event.target.value as GenerationFilters['status'])}
             >
               <option value="">모든 상태</option>
+              <option value="PENDING">대기 중</option>
               <option value="PROCESSING">생성 중</option>
               <option value="COMPLETED">사용 가능</option>
               <option value="PARTIAL_COMPLETED">일부 완료</option>
@@ -243,6 +289,13 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
           )}
         </div>
 
+        {(filters.query || filters.duration) && (
+          <p className="filter-scope-note" role="note">
+            상품명·작업 ID 검색과 길이 필터는 서버 전체가 아니라 현재까지 불러온 페이지에만 적용됩니다.
+            더 보기를 누르면 검색 범위가 함께 늘어납니다.
+          </p>
+        )}
+
         {error && (
           <div className="inline-alert" role="alert">
             <span>{error}</span>
@@ -250,7 +303,13 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
           </div>
         )}
 
-        {loading ? (
+        {offline && result.items.length === 0 ? (
+          <div className="route-state">
+            <span className="state-symbol" aria-hidden="true">↯</span>
+            <h3>오프라인이라 목록을 불러올 수 없습니다</h3>
+            <p>연결되면 자동으로 다시 시도합니다. 생성 작업은 서버에서 계속됩니다.</p>
+          </div>
+        ) : loading ? (
           <div className="job-list" aria-busy="true">
             {Array.from({ length: 4 }, (_, index) => <div className="skeleton job-row-skeleton" key={index} />)}
           </div>
@@ -337,6 +396,7 @@ function JobRow({ job }: { job: StudioJob }) {
         </div>
         <div className="job-meta">
           <strong>{formatUsd(job.actualCostUsd ?? job.estimatedCostUsd)}</strong>
+          <small>{job.actualCostUsd != null ? '실제 기록' : job.estimatedCostUsd != null ? '예상값' : '비용 미기록'}</small>
           <span>{formatDateTime(job.createdAt)}</span>
           {isJobActive(job.status) && <small>{job.message ?? '작업을 처리하고 있습니다.'}</small>}
         </div>

@@ -2,7 +2,6 @@ import type {
   GenerationJobStatus,
   GenerationStage,
   Product,
-  ScriptDocument,
   VideoCandidate,
   VisualMode,
 } from './reels';
@@ -61,6 +60,23 @@ export interface JobTemplateSnapshot {
   name: string;
   durationSeconds: number | null;
   scenes: TemplateScene[];
+  timelineSource: 'server' | 'versioned-template' | 'unrecorded';
+}
+
+export interface StudioScriptScene {
+  id: string;
+  label: string;
+  startSeconds: number;
+  endSeconds: number;
+  visual: string | null;
+  voiceover: string | null;
+  subtitle: string | null;
+  notes: string | null;
+}
+
+export interface StudioScriptDocument {
+  summary: string | null;
+  scenes: StudioScriptScene[];
 }
 
 export interface StudioJobOptions {
@@ -104,9 +120,9 @@ export interface StudioJob {
   completedCandidates: number;
   failedCandidates: number;
   estimatedCostUsd: number | null;
-  maxAuthorizedCostUsd: number | null;
+  estimatedMaxCostUsd: number | null;
   actualCostUsd: number | null;
-  script: ScriptDocument | null;
+  script: StudioScriptDocument | null;
   timingValidation: TimingSceneValidation[];
   assetWarning: string | null;
   candidates: VideoCandidate[];
@@ -117,7 +133,7 @@ export interface GenerationListSummary {
   processing: number;
   ready: number;
   needsAttention: number;
-  actualCostUsd: number;
+  actualCostUsd: number | null;
 }
 
 export interface GenerationListResult {

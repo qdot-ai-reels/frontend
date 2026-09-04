@@ -55,15 +55,11 @@ function formatCost(cost: number): string {
 export function VideoCandidateGallery({
   candidates,
   selectedCandidateId,
-  retryingCandidateId,
   onSelect,
-  onRetry,
 }: {
   candidates: VideoCandidate[];
   selectedCandidateId: string | null;
-  retryingCandidateId: string | null;
   onSelect: (candidateId: string) => void;
-  onRetry: (candidateId: string) => void;
 }) {
   return (
     <div className="candidate-gallery" aria-label="생성된 영상 후보">
@@ -71,8 +67,6 @@ export function VideoCandidateGallery({
         const selected = candidate.candidateId === selectedCandidateId;
         const passed = validationPassed(candidate.validation);
         const resolution = validationResolution(candidate.validation);
-        const retrying = candidate.candidateId === retryingCandidateId;
-        const retryInProgress = retryingCandidateId !== null;
         const score = candidate.validation?.score;
         const hasQualityMetadata =
           typeof score === 'number' ||
@@ -176,14 +170,7 @@ export function VideoCandidateGallery({
                   </a>
                 )}
                 {candidate.status === 'FAILED' && candidate.retryable && (
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={retryInProgress}
-                    onClick={() => onRetry(candidate.candidateId)}
-                  >
-                    {retrying ? '재시도 중…' : '이 후보 재시도'}
-                  </button>
+                  <span className="paid-retry-blocked">유료 재시도 차단됨</span>
                 )}
               </div>
             </div>
