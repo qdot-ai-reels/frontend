@@ -44,6 +44,54 @@ function sortVersions(versions: PromptVersion[]): PromptVersion[] {
   });
 }
 
+const PROMPT_DRAFT_STORAGE_KEY = 'quedot.prompt-settings.draft.v1';
+
+type StoredPromptDraft = {
+  selectedId: string;
+  templates: PromptTemplates;
+  versionName: string;
+  changeNote: string;
+};
+
+function readStoredPromptDraft(): StoredPromptDraft | null {
+  try {
+    const value: unknown = JSON.parse(
+      window.sessionStorage.getItem(PROMPT_DRAFT_STORAGE_KEY) ?? 'null',
+    );
+    if (!value || typeof value !== 'object') return null;
+    const candidate = value as Partial<StoredPromptDraft>;
+    if (
+      typeof candidate.selectedId !== 'string' ||
+      typeof candidate.versionName !== 'string' ||
+      typeof candidate.changeNote !== 'string' ||
+      !candidate.templates ||
+      !PROMPT_TEMPLATE_DEFINITIONS.every(
+        ({ key }) => typeof candidate.templates?.[key] === 'string',
+      )
+    ) return null;
+    return candidate as StoredPromptDraft;
+  } catch {
+    return null;
+  }
+}
+
+function discardStoredPromptDraft() {
+  try {
+    window.sessionStorage.removeItem(PROMPT_DRAFT_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+}
+
+function persistStoredPromptDraft(draft: StoredPromptDraft): boolean {
+  try {
+    window.sessionStorage.setItem(PROMPT_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function PromptSettings() {
   const [catalog, setCatalog] = useState<PromptVersionCatalog>({
     activeBundleId: null,
@@ -62,8 +110,12 @@ export function PromptSettings() {
   const savingRef = useRef(false);
   const activatingRef = useRef(false);
   const catalogRequestRef = useRef(0);
+  const draftRestoreHandledRef = useRef(false);
+  const latestDraftRef = useRef<StoredPromptDraft | null>(null);
   const activationTriggerRef = useRef<HTMLButtonElement>(null);
   const activationCancelRef = useRef<HTMLButtonElement>(null);
+  const activationConfirmRef = useRef<HTMLButtonElement>(null);
+  const activationDialogRef = useRef<HTMLDivElement>(null);
 
   const selected = useMemo(
     () => catalog.versions.find((version) => version.id === selectedId) ?? null,
@@ -85,6 +137,14 @@ export function PromptSettings() {
       ).map((definition) => definition.key),
     [selected, templates],
   );
+  const hasUnsavedChanges = Boolean(
+    selected && (
+      changedKeys.length > 0 ||
+      versionName !== selected.name ||
+      changeNote.length > 0
+    ),
+  );
+  const shouldGuardNavigation = hasUnsavedChanges || saving || activating;
   const changedFromActiveKeys = useMemo(
     () =>
       PROMPT_TEMPLATE_DEFINITIONS.filter(
@@ -118,8 +178,25 @@ export function PromptSettings() {
           (version) => version.isActive || version.id === normalizedCatalog.activeBundleId,
         ) ??
         versions[0];
-      if (nextSelected) applySelection(nextSelected);
-      else {
+      const storedDraft = draftRestoreHandledRef.current ? null : readStoredPromptDraft();
+      draftRestoreHandledRef.current = true;
+      const draftBase = storedDraft
+        ? versions.find((version) => version.id === storedDraft.selectedId)
+        : null;
+      if (
+        storedDraft &&
+        draftBase &&
+        window.confirm('이전에 저장하지 못한 프롬프트 편집본이 있습니다. 이어서 편집할까요?')
+      ) {
+        setSelectedId(draftBase.id);
+        setTemplates(cloneTemplates(storedDraft.templates));
+        setVersionName(storedDraft.versionName);
+        setChangeNote(storedDraft.changeNote);
+        setActivationTargetId(null);
+      } else if (nextSelected) {
+        if (storedDraft) discardStoredPromptDraft();
+        applySelection(nextSelected);
+      } else {
         setSelectedId(null);
         setTemplates(emptyPromptTemplates());
         setVersionName('');
@@ -137,18 +214,40 @@ export function PromptSettings() {
   }, [loadCatalog]);
 
   useEffect(() => {
-    if (changedKeys.length === 0) return;
+    if (!selectedId) return;
+    if (!hasUnsavedChanges) {
+      latestDraftRef.current = null;
+      discardStoredPromptDraft();
+      return;
+    }
+    const draft = { selectedId, templates, versionName, changeNote };
+    latestDraftRef.current = draft;
+    const timer = window.setTimeout(() => {
+      if (!persistStoredPromptDraft(draft)) {
+        setError('브라우저 임시 저장을 사용할 수 없습니다. 이 페이지에서 새 버전 저장을 완료해 주세요.');
+      }
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [changeNote, hasUnsavedChanges, selectedId, templates, versionName]);
+
+  useEffect(() => {
+    if (!shouldGuardNavigation) return;
 
     const confirmMessage =
       '저장하지 않은 프롬프트 변경이 있습니다. 변경을 버리고 페이지를 이동할까요?';
+    const persistLatestDraft = () => {
+      const draft = latestDraftRef.current;
+      if (draft && !persistStoredPromptDraft(draft)) {
+        setError('브라우저 임시 저장을 사용할 수 없습니다. 이 페이지에서 새 버전 저장을 완료해 주세요.');
+      }
+    };
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (savingRef.current) return;
+      persistLatestDraft();
       event.preventDefault();
       event.returnValue = '';
     };
     const handleLinkNavigation = (event: MouseEvent) => {
       if (
-        savingRef.current ||
         event.defaultPrevented ||
         event.button !== 0 ||
         event.metaKey ||
@@ -166,39 +265,138 @@ export function PromptSettings() {
         destination.pathname === current.pathname &&
         destination.search === current.search
       ) return;
-      if (!window.confirm(confirmMessage)) {
+      if (savingRef.current || activatingRef.current) {
+        persistLatestDraft();
         event.preventDefault();
         event.stopImmediatePropagation();
+        setError('저장 또는 활성화가 완료된 뒤 페이지를 이동해 주세요.');
+      } else if (!window.confirm(confirmMessage)) {
+        persistLatestDraft();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      } else {
+        discardStoredPromptDraft();
       }
     };
+    type NavigateEventLike = Event & {
+      canIntercept?: boolean;
+      navigationType?: string;
+    };
+    type WindowWithNavigation = Window & { navigation?: EventTarget };
+    const navigation = (window as WindowWithNavigation).navigation;
+    const handleHistoryNavigation = (event: Event) => {
+      const navigateEvent = event as NavigateEventLike;
+      if (navigateEvent.navigationType !== 'traverse') return;
+      persistLatestDraft();
+      if (!event.cancelable || navigateEvent.canIntercept === false) return;
+      if (savingRef.current || activatingRef.current) {
+        event.preventDefault();
+        setError('저장 또는 활성화가 완료된 뒤 페이지를 이동해 주세요.');
+      } else if (!window.confirm(confirmMessage)) {
+        event.preventDefault();
+      } else {
+        discardStoredPromptDraft();
+      }
+    };
+
+    const historyGuardKey = '__quedotPromptEditorGuard';
+    const historyGuardId = window.crypto.randomUUID();
+    let restoringHistoryGuard = false;
+    let historyGuardActive = false;
+    const handleGuardedPopState = () => {
+      if (restoringHistoryGuard) {
+        restoringHistoryGuard = false;
+        return;
+      }
+      if (savingRef.current || activatingRef.current) {
+        persistLatestDraft();
+        restoringHistoryGuard = true;
+        window.history.forward();
+        setError('저장 또는 활성화가 완료된 뒤 페이지를 이동해 주세요.');
+        return;
+      }
+      persistLatestDraft();
+      if (window.confirm(confirmMessage)) {
+        discardStoredPromptDraft();
+        historyGuardActive = false;
+        window.removeEventListener('popstate', handleGuardedPopState, true);
+        window.history.back();
+        return;
+      }
+      restoringHistoryGuard = true;
+      window.history.forward();
+    };
+
+    if (navigation) {
+      navigation.addEventListener('navigate', handleHistoryNavigation);
+    } else {
+      window.history.pushState(
+        { ...window.history.state, [historyGuardKey]: historyGuardId },
+        '',
+        window.location.href,
+      );
+      historyGuardActive = true;
+      window.addEventListener('popstate', handleGuardedPopState, true);
+    }
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     document.addEventListener('click', handleLinkNavigation, true);
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
       document.removeEventListener('click', handleLinkNavigation, true);
+      navigation?.removeEventListener('navigate', handleHistoryNavigation);
+      window.removeEventListener('popstate', handleGuardedPopState, true);
+      if (
+        historyGuardActive &&
+        window.history.state?.[historyGuardKey] === historyGuardId
+      ) {
+        window.history.back();
+      }
     };
-  }, [changedKeys.length]);
+  }, [shouldGuardNavigation]);
 
   useEffect(() => {
     if (!activationTargetId) return;
-    activationCancelRef.current?.focus();
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setActivationTargetId(null);
-      window.requestAnimationFrame(() => activationTriggerRef.current?.focus());
+    if (activating) activationDialogRef.current?.focus();
+    else activationCancelRef.current?.focus();
+    const handleDialogKeyboard = (event: KeyboardEvent) => {
+      if (activatingRef.current) {
+        if (event.key === 'Escape' || event.key === 'Tab') event.preventDefault();
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeActivationDialog();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const first = activationCancelRef.current;
+      const last = activationConfirmRef.current;
+      if (!first || !last) return;
+      const activeElement = document.activeElement;
+      if (event.shiftKey && (activeElement === first || activeElement === null)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (activeElement !== first && activeElement !== last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
-  }, [activationTargetId]);
+    document.addEventListener('keydown', handleDialogKeyboard);
+    return () => document.removeEventListener('keydown', handleDialogKeyboard);
+  }, [activating, activationTargetId]);
 
   function selectVersion(version: PromptVersion) {
     if (savingRef.current || activatingRef.current) return;
-    if (changedKeys.length > 0) {
+    if (hasUnsavedChanges) {
       const discard = window.confirm(
         '저장하지 않은 프롬프트 변경이 있습니다. 변경을 버리고 다른 버전을 열까요?',
       );
       if (!discard) return;
+      discardStoredPromptDraft();
     }
     setError(null);
     setNotice(null);
@@ -215,6 +413,17 @@ export function PromptSettings() {
   function closeActivationDialog() {
     setActivationTargetId(null);
     window.requestAnimationFrame(() => activationTriggerRef.current?.focus());
+  }
+
+  function reloadCatalog() {
+    if (
+      hasUnsavedChanges &&
+      !window.confirm(
+        '저장하지 않은 프롬프트 변경이 있습니다. 변경을 버리고 서버 버전을 다시 불러올까요?',
+      )
+    ) return;
+    discardStoredPromptDraft();
+    void loadCatalog(selectedId ?? undefined);
   }
 
   async function saveVersion(event: React.FormEvent<HTMLFormElement>) {
@@ -251,7 +460,7 @@ export function PromptSettings() {
 
   async function activateVersion() {
     if (!activationTargetId || activatingRef.current || savingRef.current) return;
-    if (changedKeys.length > 0) {
+    if (hasUnsavedChanges) {
       setActivationTargetId(null);
       setError(
         '편집 중인 내용을 먼저 새 버전으로 저장한 뒤, 저장된 버전을 활성화해 주세요.',
@@ -309,7 +518,7 @@ export function PromptSettings() {
           <button
             type="button"
             disabled={saving || activating || loading}
-            onClick={() => void loadCatalog(selectedId ?? undefined)}
+            onClick={reloadCatalog}
           >
             다시 불러오기
           </button>
@@ -370,7 +579,7 @@ export function PromptSettings() {
                   ref={activationTriggerRef}
                   className="button button-secondary"
                   type="button"
-                  disabled={saving || activating || changedKeys.length > 0}
+                  disabled={saving || activating || hasUnsavedChanges}
                   onClick={() => setActivationTargetId(selected.id)}
                 >
                   이 버전 활성화 준비
@@ -382,17 +591,20 @@ export function PromptSettings() {
               활성화는 이후 생성되는 신규 견적과 작업에만 적용됩니다. 이미 접수됐거나 처리 중인
               작업은 job에 저장된 기존 prompt version snapshot을 계속 사용합니다.
             </p>
-            {selected && !selected.isActive && changedKeys.length > 0 && (
+            {selected && !selected.isActive && hasUnsavedChanges && (
               <p className="prompt-release-policy" role="status">
                 편집본은 아직 저장된 버전이 아닙니다. 아래에서 새 버전으로 저장하면 활성화할 수 있습니다.
               </p>
             )}
             {activationTargetId && (
               <div
+                ref={activationDialogRef}
                 className="prompt-activation-confirm"
                 role="alertdialog"
                 aria-labelledby="activation-title"
                 aria-describedby="activation-description"
+                aria-busy={activating}
+                tabIndex={-1}
               >
                 <div>
                   <strong id="activation-title">활성 버전을 변경할까요?</strong>
@@ -400,7 +612,7 @@ export function PromptSettings() {
                 </div>
                 <div className="inline-actions">
                   <button ref={activationCancelRef} className="button button-ghost" type="button" disabled={activating} onClick={closeActivationDialog}>취소</button>
-                  <button className="button button-primary" type="button" disabled={saving || activating || changedKeys.length > 0} onClick={() => void activateVersion()}>
+                  <button ref={activationConfirmRef} className="button button-primary" type="button" disabled={saving || activating || hasUnsavedChanges} onClick={() => void activateVersion()}>
                     {activating ? '활성화 중…' : '신규 작업에 활성화'}
                   </button>
                 </div>
