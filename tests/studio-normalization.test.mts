@@ -71,6 +71,7 @@ test('keeps a recoverable pending submission identifier', () => {
       createdAt: '2026-09-04T01:02:03Z',
       request: {
         productId: 'product-1',
+        productRevision: 4,
         templateId: 'ugc_full_15',
         templateVersion: '1',
         visualMode: 'generated_model',
@@ -98,6 +99,7 @@ test('keeps a recoverable pending submission identifier', () => {
     createdAt: '2026-09-04T01:02:03Z',
     request: {
       productId: 'product-1',
+      productRevision: 4,
       templateId: 'ugc_full_15',
       templateVersion: '1',
       visualMode: 'generated_model',
@@ -131,6 +133,51 @@ test('keeps a recoverable pending submission identifier', () => {
       }),
     )?.requestBody,
     null,
+  );
+});
+
+test('parses pending catalog revision as a strict positive integer', () => {
+  const base = {
+    clientRequestId: 'client-123',
+    quoteId: 'quote-456',
+    createdAt: '2026-09-04T01:02:03Z',
+    request: {
+      productId: 'product-1',
+      templateId: 'ugc_full_15',
+      templateVersion: '1',
+      visualMode: 'generated_model',
+      influencerImageUrls: [],
+      outputCount: 1,
+      cta: '',
+      advertisingPurpose: '',
+      channel: 'Instagram Reels',
+      mustInclude: '',
+      mustExclude: '',
+      extraDetails: '',
+      promptVersionId: null,
+    },
+  };
+
+  assert.equal(
+    parsePendingSubmission(JSON.stringify({
+      ...base,
+      request: { ...base.request, productRevision: '4' },
+    }))?.request?.productRevision,
+    null,
+  );
+  assert.equal(
+    parsePendingSubmission(JSON.stringify({
+      ...base,
+      request: { ...base.request, productRevision: 0 },
+    }))?.request?.productRevision,
+    null,
+  );
+  assert.equal(
+    parsePendingSubmission(JSON.stringify({
+      ...base,
+      request: { ...base.request, productRevision: 4 },
+    }))?.request?.productRevision,
+    4,
   );
 });
 

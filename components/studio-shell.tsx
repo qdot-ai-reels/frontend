@@ -1,6 +1,6 @@
-import Link from 'next/link';
 import type { ReactNode } from 'react';
 
+import { GuardedLink as Link } from './navigation-guard';
 import { StudioNav } from './studio-nav';
 
 export function StudioShell({ children }: { children: ReactNode }) {

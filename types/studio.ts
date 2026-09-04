@@ -1,10 +1,10 @@
 import type {
   GenerationJobStatus,
   GenerationStage,
-  Product,
   VideoCandidate,
   VisualMode,
 } from './reels';
+import type { CatalogProduct } from './product-catalog';
 
 export type StudioTemplateDuration = 4 | 6 | 8 | 15;
 
@@ -201,7 +201,7 @@ export interface GenerationFilters {
 }
 
 export interface CreateDraft {
-  product: Product;
+  product: CatalogProduct | null;
   template: GenerationTemplate | null;
   visualMode: VisualMode;
   influencerImageUrls: string[];
@@ -215,7 +215,8 @@ export interface CreateDraft {
   promptVersionId: string | null;
 }
 
-export interface StartGenerationInput extends CreateDraft {
+export interface StartGenerationInput extends Omit<CreateDraft, 'product'> {
+  product: CatalogProduct;
   quoteId: string;
   clientRequestId: string;
 }

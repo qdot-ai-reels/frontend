@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
 
+import { NavigationGuardProvider } from '@/components/navigation-guard';
 import { StudioShell } from '@/components/studio-shell';
 
 export default function StudioLayout({ children }: { children: ReactNode }) {
-  return <StudioShell>{children}</StudioShell>;
+  return (
+    <NavigationGuardProvider>
+      <StudioShell>{children}</StudioShell>
+    </NavigationGuardProvider>
+  );
 }

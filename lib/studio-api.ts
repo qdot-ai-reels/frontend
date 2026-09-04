@@ -1,15 +1,16 @@
-import { activeInfluencerReferenceUrls } from './influencer-references';
+import { activeInfluencerReferenceUrls } from './influencer-references.ts';
+import { isProductAvailableForGeneration } from './product-catalog.ts';
 import {
   normalizeCreatedPromptVersionResponse,
   normalizePromptVersionCatalog,
   normalizePromptVersionReference,
-} from './prompt-versions';
+} from './prompt-versions.ts';
 import {
   isIdentityReferenceProductionEnabled,
   normalizeStudioScript,
   parseApiDate,
   resolveSafeMediaUrl,
-} from './studio-normalization';
+} from './studio-normalization.ts';
 import type {
   CandidateValidationMetadata,
   GenerationJobStatus,
@@ -206,13 +207,18 @@ export function safeMediaUrl(value: unknown): string | null {
 }
 
 export class StudioApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
   constructor(
     message: string,
-    readonly status: number,
-    readonly code: string | null,
+    status: number,
+    code: string | null,
   ) {
     super(message);
     this.name = 'StudioApiError';
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -643,6 +649,11 @@ function normalizeQuote(value: unknown): GenerationQuote {
 function buildGenerationRequestBody(input: StartGenerationInput): Record<string, unknown> {
   if (!input.template) throw new Error('생성할 템플릿이 없습니다.');
   if (!input.promptVersionId) throw new Error('활성 프롬프트 버전을 확인해 주세요.');
+  if (!isProductAvailableForGeneration(input.product)) {
+    throw new Error(
+      '활성 상품과 유효한 catalog revision을 확인할 수 없습니다. 상품 목록을 다시 불러와 주세요.',
+    );
+  }
   const references =
     input.visualMode === 'model_included'
       ? activeInfluencerReferenceUrls(input.influencerImageUrls)
@@ -650,6 +661,7 @@ function buildGenerationRequestBody(input: StartGenerationInput): Record<string,
   const body: Record<string, unknown> = {
     product: input.product.rawProduct,
     image_url: input.product.imageUrl,
+    product_catalog_revision: input.product.revision,
     visual_mode: input.visualMode,
     prompt_version_id: input.promptVersionId,
     creative_brief: {

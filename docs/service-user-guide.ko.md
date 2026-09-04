@@ -25,6 +25,7 @@ Studio는 검수된 상품 에셋으로 짧은 세로형 광고 영상을 만들
 - 생성 전에 영상 provider 예상 비용을 확인한다.
 - 스크립트, 한국어 음성, 영상 후보, 음성 결합, 자막·기술 검수를 하나의 작업으로 실행한다.
 - 브라우저를 닫거나 새로고침해도 영상 라이브러리에서 기존 작업을 다시 연다.
+- 광고 상품을 별도 카탈로그에 검수 대기로 등록하고, 사람의 자산 검수 후 생성 대상으로 활성화한다.
 - 실제 생성 프롬프트를 코드 수정 없이 새 버전으로 저장하고 활성화한다.
 
 ### 1.2 현재 보장 범위
@@ -56,6 +57,7 @@ Studio는 검수된 상품 에셋으로 짧은 세로형 광고 영상을 만들
 | --- | --- | --- | --- |
 | 영상 라이브러리 | /videos | 작업 검색, 상태 확인, 결과 재진입 | 없음 |
 | 새 영상 만들기 | /create | 상품·전략·광고 방향·비용을 확인하고 생성 시작 | 마지막 생성 버튼에서 발생 가능 |
+| 광고 상품 관리 | /products | 상품·이미지 등록, 기술 점검, 의미 검수, 활성·비활성·보관 | 없음 |
 | 작업 상세 | /videos/{jobId} | 진행 단계, 후보, 비용, 스크립트 타임라인 확인 | 조회·다운로드는 없음 |
 | 프롬프트 설정 | /settings/prompts | 프롬프트 편집, 새 버전 저장, 활성 버전 전환 | 없음 |
 | 이전 링크 호환 | /?job={jobId} | 과거 북마크를 작업 상세로 연결 | 없음 |
@@ -67,12 +69,14 @@ flowchart LR
     U["운영자"] --> NAV["Studio 공통 메뉴"]
     NAV --> LIB["영상 라이브러리<br/>/videos"]
     NAV --> CREATE["새 영상 만들기<br/>/create"]
+    NAV --> PRODUCT["광고 상품 관리<br/>/products"]
     NAV --> PROMPT["프롬프트 설정<br/>/settings/prompts"]
 
     LIB --> DETAIL["작업 상세<br/>/videos/{jobId}"]
     CREATE --> DETAIL
     DETAIL --> COPY["설정 참고해 새 후보 만들기"]
     COPY --> CREATE
+    PRODUCT -->|"검수 후 활성 상품"| CREATE
     PROMPT --> CREATE
 
     LEGACY["이전 주소<br/>/?job=jobId"] --> DETAIL
@@ -82,8 +86,9 @@ flowchart LR
 
 ~~~mermaid
 flowchart TD
-    A["프롬프트 설정에서 활성 버전 확인"] --> B["새 영상 만들기"]
-    B --> C["1. 상품 선택"]
+    A["프롬프트 설정에서 활성 버전 확인"] --> P["광고 상품 등록·자산 검수·활성화"]
+    P --> B["새 영상 만들기"]
+    B --> C["1. 활성 상품 선택"]
     C --> D["2. 4·6·8·15초 전략 선택"]
     D --> E["3. 출연 방식과 광고 방향 입력"]
     E --> F["4. 예상 비용·타임라인·프롬프트 버전 확인"]
@@ -157,8 +162,8 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 
 ### 4.1 Desktop과 Mobile 메뉴
 
-- Desktop에서는 왼쪽 sidebar에 영상 라이브러리, 새 영상 만들기, 프롬프트 설정이 표시된다.
-- Mobile에서는 같은 세 메뉴가 화면 하단 navigation으로 표시된다.
+- Desktop에서는 왼쪽 sidebar에 영상 라이브러리, 새 영상 만들기, 광고 상품 관리, 프롬프트 설정이 표시된다.
+- Mobile에서는 같은 네 메뉴가 화면 하단 navigation으로 표시된다.
 - QUEDOT Shorts Studio 브랜드 로고를 누르면 영상 라이브러리로 이동한다.
 - 키보드 사용자는 첫 focus의 **본문으로 바로가기**로 공통 메뉴를 건너뛸 수 있다.
 - 현재 메뉴는 색상과 aria-current로 구분된다.
@@ -206,14 +211,167 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 
 ---
 
-## 5. 영상 라이브러리
+## 5. 광고 상품 관리
+
+주소: /products
+
+광고 상품 관리는 영상 생성에 사용할 상품과 이미지 자산의 운영 카탈로그다. 상품을 저장했다고
+즉시 생성에 노출하지 않는다. **기술 검증**과 **사람의 의미 검수**를 분리하고, 명시적으로
+활성화한 상품만 새 영상 만들기에서 선택할 수 있다. 상품 등록·수정·상태 변경 자체는 영상
+provider 생성 요청을 보내지 않으므로 영상 생성 비용이 발생하지 않는다.
+
+### 5.1 상품 상태
+
+| 화면 상태 | API 상태 | 새 영상 선택 | 의미 |
+| --- | --- | --- | --- |
+| 검수 대기 | is_active=false, archived_at=null | 불가 | 저장 또는 수정은 끝났지만 운영자 의미 검수가 끝나지 않음 |
+| 활성 | is_active=true, archived_at=null | 가능 | 기술 점검과 사람의 자산 검수 확인이 모두 기록됨 |
+| 보관됨 | is_active=false, archived_at 있음 | 불가 | 목록 기록은 유지하지만 현재 사용하지 않는 상품 |
+
+상단의 전체·활성·검수 대기·보관 카드는 현재 카탈로그 수량과 상태 필터 역할을 함께 한다.
+검색에서는 상품명, 브랜드·큐레이터, 공구·이벤트명과 상품 ID를 찾을 수 있다.
+
+### 5.2 새 상품 등록 흐름
+
+~~~mermaid
+flowchart TD
+    A["광고 상품 관리에서 상품 추가"] --> B{"입력 방법"}
+    B -->|"직접 입력"| C["기본 정보·이미지·광고 문맥 입력"]
+    B -->|"상품 JSON 불러오기"| D["객체 한 개 붙여넣기"]
+    D --> E["알려진 필드만 form에 채움"]
+    E --> C
+    C --> F["검수 대기로 저장"]
+    F --> G["Backend URL·다운로드·파일 기술 규격 검사"]
+    G -->|"실패"| H["오류 확인 후 자산 수정"]
+    H --> C
+    G -->|"통과"| I["is_active=false로 영속화"]
+    I --> J["운영자가 대표 이미지와 광고 주장을 직접 검수"]
+    J --> K["검수 근거 입력 + 확인 checkbox"]
+    K --> L["활성화"]
+    L --> M["새 영상 만들기 상품 목록에 표시"]
+~~~
+
+1. 공통 메뉴에서 **광고 상품 관리**를 연다.
+2. 우측 상단 **상품 추가**를 누른다.
+3. 필수 상품명과 공개 HTTPS 대표 이미지 URL을 입력한다.
+4. 브랜드, 공구명, 옵션, 판매가, 할인, 카테고리, 판매 포인트와 상세 이미지를 가능한 범위에서 채운다.
+5. **검수 대기로 저장**을 누른다. 신규 상품은 활성 요청 값을 가져오거나 붙여 넣어도 항상 비활성으로 저장된다.
+6. 저장 후 열리는 활성화 확인에서 이미지를 직접 보고 검수 근거를 입력한다.
+7. 세 가지 검수 항목을 확인하고 checkbox에 동의한 뒤 **검수 기록 후 활성화**를 누른다.
+
+### 5.3 입력 필드
+
+| 구역 | 필드 | 필수 | 운영 의미 |
+| --- | --- | --- | --- |
+| 기본 정보 | 상품명 | 필수 | 목록, 생성 snapshot과 결과에서 표시하는 이름 |
+| 기본 정보 | 브랜드 / 큐레이터 | 권장 | 생성 문맥과 운영 검색에 사용 |
+| 기본 정보 | 공구 / 이벤트명 | 권장 | 어떤 판매 이벤트용 소재인지 구분 |
+| 기본 정보 | 상품 옵션 | 권장 | 색상·용량·구성 등 실제 광고 대상을 고정 |
+| 기본 정보 | 판매가·할인 표시 | 선택 | 입력 시 실제 판매 조건과 일치하는지 사람이 확인 |
+| 기본 정보 | 카테고리 | 권장 | 쉼표로 여러 값을 구분 |
+| 기본 정보 | 상품 ID | 선택 | 비우면 서버가 생성; 저장 후 변경 불가 |
+| 이미지 자산 | 대표 이미지 URL | 필수 | 인증 정보가 없는 공개 HTTPS 원본 |
+| 이미지 자산 | 상세 이미지 URL | 선택 | 줄바꿈 또는 쉼표로 구분, 중복 제거, 최대 8개 |
+| 이미지 자산 | 정사각 처리 | 필수 | 중앙 크롭 허용 또는 정사각 이미지 거부 |
+| 광고 문맥 | 핵심 판매 포인트 | 권장 | 확인된 특징과 효익만 기록해 모델의 추측을 줄임 |
+| 광고 문맥 | 자산 검수 준비 메모 | 권장 | 보이지 않는 수량·라벨·주장 등 사용 제한을 기록 |
+
+대표 이미지는 입력 중 미리보기를 제공한다. 임의의 운영 도메인을 build 시점 allowlist에 넣지
+않아도 되도록 브라우저가 직접 표시하지만, URL에는 사용자명·비밀번호를 포함할 수 없고 HTTP,
+javascript, data scheme은 허용하지 않는다.
+
+### 5.4 상품 JSON 불러오기
+
+**상품 JSON 불러오기**는 기존 데이터 한 건을 form에 옮기는 보조 기능이다.
+
+- 배열이나 여러 상품의 일괄 등록·일괄 활성화는 지원하지 않는다.
+- `product`, `item`, `data`, `raw_product` envelope 안의 알려진 상품 필드를 읽는다.
+- 화면에 표시되지 않는 임의 필드로 검수나 활성화를 우회하지 않는다.
+- JSON을 불러온 직후에는 서버 요청이 발생하지 않는다.
+- 반드시 이미지 미리보기와 form 값을 확인한 뒤 **검수 대기로 저장**해야 한다.
+
+예시:
+
+~~~json
+{
+  "name": "광고할 상품명",
+  "curator": "브랜드명",
+  "image_url": "https://cdn.example.com/product.jpg",
+  "detail_image_urls": ["https://cdn.example.com/detail-1.jpg"],
+  "category_group": ["식품"],
+  "selling_point": "확인된 핵심 특징"
+}
+~~~
+
+### 5.5 기술 검증과 의미 검수
+
+두 검증은 서로 대체하지 않는다.
+
+| 계층 | 담당 | 확인 내용 | 자동 보장하지 않는 것 |
+| --- | --- | --- | --- |
+| 기술 검증 | Backend | 공개 HTTPS, 다운로드 가능 여부, 형식·용량·해상도·종횡비와 provider readiness | 사진 속 제품의 실제 정체, 옵션, 수량, 표시·효능의 진실성 |
+| 의미 검수 | 운영자 | 실제 광고 상품과 이미지 일치, 구성 수량, 라벨, 할인·효능 주장, 사용 제한 | provider가 생성할 최종 장면 품질 |
+| 결과 검수 | 운영자 | 생성 후보의 제품 보존, 자막·음성, 광고 오해 가능성 | 다른 후보나 다음 생성의 동일성 |
+
+상품 카탈로그를 저장하거나 이미지 URL을 수정할 때에는 대표 이미지와 모든 상세 이미지가 각각
+15 MiB 이하의 실제 JPEG/JPG, PNG 또는 WebP 파일이어야 한다. 가로·세로는 모두 512px 이상,
+긴 변과 짧은 변의 비율은 4:1 이하여야 한다. 상세 이미지 하나라도 이 기준을 통과하지 못하면
+조용히 제외하지 않고 상품 저장 전체를 거부한다. 아래 7.5절의 100/240px 기준은 생성 실행 시
+입력을 다시 확인하는 기준이며 카탈로그 등록 허용 기준이 아니다.
+
+활성화 창에는 대표 이미지, 상품 ID와 revision이 표시된다. **검수 근거**는 비워 둘 수 없고,
+확인 checkbox를 선택해야 활성화 API가 호출된다. 기술 검증이 성공했다는 사실만 복사해 넣지 말고,
+실제로 확인한 옵션·수량·사용 금지 주장을 적는다.
+
+### 5.6 수정·비활성화·보관·복구
+
+- **편집:** 저장된 상품의 모든 운영 필드를 수정한다. 어떤 수정이든 기존 활성 검수를 무효화하고
+  상품을 자동 비활성화한다. 수정 후 새 revision의 자산을 다시 보고 활성화한다.
+- **비활성화:** 상품 기록은 유지하되 즉시 새 영상 선택 목록에서 제외한다.
+- **보관:** soft archive다. DB 기록과 기존 job snapshot은 삭제하지 않는다.
+- **복구 및 활성화:** 보관 상품도 같은 의미 검수 dialog를 다시 통과하면 archived_at을 지우고 활성화한다.
+
+활성 상품을 수정하거나 보관하는 동안 이미 접수된 job의 상품 snapshot은 바뀌지 않는다. 반대로
+아직 생성 요청을 보내지 않은 Create 화면은 최신 활성 카탈로그를 다시 확인해야 한다.
+
+### 5.7 동시 편집과 revision 보호
+
+~~~mermaid
+sequenceDiagram
+    participant A as 운영자 A
+    participant B as 운영자 B
+    participant API as Product API
+    participant DB as Catalog DB
+
+    A->>API: GET products
+    B->>API: GET products
+    API-->>A: product revision 3
+    API-->>B: product revision 3
+    A->>API: PUT expected_revision=3
+    API->>DB: revision 4, 자동 비활성화
+    API-->>A: revision 4
+    B->>API: activate expected_revision=3
+    API-->>B: 409 PRODUCT_REVISION_CONFLICT
+    B->>API: GET products
+    API-->>B: 최신 revision 4
+~~~
+
+편집, 활성화, 비활성화, 보관은 화면이 읽은 `expected_revision`을 함께 보낸다. 다른 탭이나
+운영자가 먼저 변경해 revision이 달라지면 서버는 덮어쓰지 않고 409를 반환한다. 단, 이미 보관된
+상품에 같은 보관 요청을 다시 보내는 경우에는 멱등 재시도로 처리해 stale revision이어도 현재 보관
+상태를 200으로 반환한다. 그 밖의 충돌에서는 화면이 최신 목록을 다시 불러오며, 기존 입력이 최신
+상품에도 맞는지 확인한 뒤 다시 저장해야 한다.
+
+---
+
+## 6. 영상 라이브러리
 
 주소: /videos
 
 영상 라이브러리는 생성된 job을 다시 찾는 기본 시작 화면이다. 브라우저를 닫은 뒤에도
 서버 DB에 저장된 작업을 이 화면에서 다시 조회한다.
 
-### 5.1 상단 요약 카드
+### 6.1 상단 요약 카드
 
 | 카드 | 의미 |
 | --- | --- |
@@ -225,7 +383,7 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 
 요약은 전체 서비스의 영구 통계가 아니라 **현재 불러온 결과 범위**에 대한 요약이다.
 
-### 5.2 검색과 필터
+### 6.2 검색과 필터
 
 | 필터 | 값 | 적용 범위 |
 | --- | --- | --- |
@@ -246,7 +404,7 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 /videos?query=사과주스
 ~~~
 
-### 5.3 작업 행에서 확인하는 정보
+### 6.3 작업 행에서 확인하는 정보
 
 - 상품 이미지와 상품명
 - 작업 상태 badge
@@ -261,7 +419,7 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 
 작업 행을 누르면 /videos/{jobId} 상세 화면으로 이동한다.
 
-### 5.4 목록 상태별 행동
+### 6.4 목록 상태별 행동
 
 | 화면 상태 | 표시 내용 | 사용자 행동 |
 | --- | --- | --- |
@@ -275,11 +433,11 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 
 ---
 
-## 6. 새 영상 만들기
+## 7. 새 영상 만들기
 
 주소: /create
 
-### 6.1 생성 전에 확인할 것
+### 7.1 생성 전에 확인할 것
 
 1. 현재 프롬프트 활성 버전이 의도한 release인지 확인한다.
 2. 상품 이미지가 실제 판매 구성을 정확히 보여주는지 확인한다.
@@ -287,7 +445,7 @@ cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 4. CTA와 광고 목적에 검증되지 않은 효능·할인·수량 주장이 없는지 확인한다.
 5. 마지막 생성 버튼은 실제 provider 비용을 발생시킬 수 있음을 확인한다.
 
-### 6.2 생성 전체 호출 흐름
+### 7.2 생성 전체 호출 흐름
 
 ~~~mermaid
 sequenceDiagram
@@ -328,22 +486,22 @@ sequenceDiagram
 현재 Worker는 durable queue가 아니라 FastAPI BackgroundTasks 경계다.
 프로세스가 살아 있는 동안의 로컬 사용에는 적합하지만, 처리 중 프로세스 재시작 복구를 보장하지 않는다.
 
-### 6.3 Step 1 — 상품
+### 7.3 Step 1 — 상품
 
-화면에는 production allowlist에 포함된 상품만 표시된다.
+화면에는 광고 상품 관리에서 **활성화한 최신 상품 revision**만 표시된다.
 
 - 상품 카드에서 이미지, 큐레이터, 상품명, 옵션을 확인한다.
 - 선택된 카드는 radio 상태로 표시된다.
-- 기술적으로 사용할 수 있는 상품 수와 최종 생성 허용 상품 수를 구분해서 표시한다.
+- 검수 대기·비활성·보관 상품은 생성 대상으로 표시하지 않는다.
 - 상품마다 **에셋 주의** 내용을 반드시 읽는다.
+- 필요한 상품이 없으면 광고 상품 관리로 이동해 등록·기술 검증·의미 검수·활성화를 완료한다.
 
-현재 데이터 기준 기술·필드 검수 후보는 22개지만, 실제 영상 생성 allowlist는 사과주스 1개다.
+Backend는 생성 요청의 `product_id`와 `product_catalog_revision`을 활성 카탈로그와 다시 대조한다.
+상품이 비활성화됐거나 수정되어 revision이 바뀌었으면 오래 열린 Create 화면의 snapshot을 그대로
+접수하지 않고 최신 상품을 다시 선택하도록 안내한다. 이 검사는 stale·변조 요청을 막지만 이미지가
+광고 주장 전체를 입증하는지는 보장하지 않으므로 등록 때 남긴 자산 검수 메모를 함께 따른다.
 
-현재 사과주스 에셋은 판매 단위가 30포인 상품의 대표 파우치 1개 이미지다.
-따라서 영상에서 30개 구성, 박스 구성, 작은 패키지 글자, 할인·효능을 이미지가 입증한 사실처럼
-표현하면 안 된다.
-
-### 6.4 Step 2 — 영상 전략
+### 7.4 Step 2 — 영상 전략
 
 전략은 길이 숫자만 저장하는 것이 아니라 장면 순서와 구간을 포함하는 versioned template이다.
 API가 알려 주는 `default_template_id`는 15초 풀 스토리다. 다만 현재 Create 화면은 처음 열 때
@@ -364,7 +522,7 @@ API가 알려 주는 `default_template_id`는 15초 풀 스토리다. 다만 현
 - API가 실패했을 때 보이는 fallback template은 구조 설명용이다.
 - Fresh server quote가 없으면 fallback만으로 생성 버튼은 활성화되지 않는다.
 
-### 6.5 Step 3 — 크리에이티브
+### 7.5 Step 3 — 크리에이티브
 
 #### 출연 방식
 
@@ -385,14 +543,14 @@ API가 알려 주는 `default_template_id`는 15초 풀 스토리다. 다만 현
 | --- | --- |
 | URL | 공개 IP로 해석되는 HTTPS 주소만 허용. 사용자명·비밀번호, localhost, 사설·link-local·reserved 주소와 안전하지 않은 redirect는 거부 |
 | 운영 host 제한 | `ALLOWED_IMAGE_HOSTS`가 설정된 경우 등록된 CDN host 또는 허용 wildcard만 사용 |
-| 파일 크기 | 이미지 한 장당 최대 25MB |
-| 파일 형식 | JPEG/JPG, PNG, BMP, WebP |
-| 상품·필수 이미지 크기 | 가로·세로 각각 최소 100px |
-| 상품 상세 이미지 크기 | 가로·세로 각각 최소 240px. 선택 reference이므로 부적합하면 생성 전체를 막는 대신 제외될 수 있음 |
+| 파일 크기 | 이미지 한 장당 최대 15 MiB(15×1024×1024 bytes) |
+| 파일 형식 | JPEG/JPG, PNG, WebP. BMP는 지원하지 않음 |
+| 생성 요청의 상품·필수 이미지 크기 | 가로·세로 각각 최소 100px. 카탈로그 등록에는 5.5절의 더 엄격한 512px·4:1 기준 적용 |
+| 생성 요청의 상품 상세 이미지 크기 | 가로·세로 각각 최소 240px. 생성 시 선택 reference이므로 부적합하면 제외될 수 있지만, 카탈로그 저장 시에는 모든 상세 이미지가 512px·4:1 기준을 통과해야 함 |
 | 지정 모델 reference | 중복을 제거한 뒤 최대 2장, 가로·세로 각각 최소 256px |
 | 지정 모델 구도 | 운영 기준은 한 사람만 보이는 세로형 또는 정사각형. Backend는 의미를 판별하지 않으며 `가로/세로 > 1.1`인 가로형 contact sheet를 자동 거부 |
 
-확장자나 URL 문자열만 통과시키는 방식이 아니다. Backend가 이미지를 최대 25MB 범위에서
+확장자나 URL 문자열만 통과시키는 방식이 아니다. Backend가 이미지를 최대 15 MiB 범위에서
 안전하게 내려받아 실제 codec과 크기를 확인하므로, 로그인·cookie·특수 header가 필요한 링크나
 HTML 공유 페이지 주소는 직접 이미지 URL로 사용할 수 없다.
 기술 검사를 통과한 이미지라도 민감하거나 동의가 불명확한 인물 내용은 provider가 뒤늦게 거절할 수 있다.
@@ -421,7 +579,7 @@ HTML 공유 페이지 주소는 직접 이미지 URL로 사용할 수 없다.
 | 포함 금지 | 30포 수량 주장, 박스 구성, 할인율, 건강 효능, 읽을 수 없는 라벨 생성 |
 | 기타 요청 | 자연광, 과도한 카메라 흔들림 금지, 상품 전면이 가려지지 않게 구성 |
 
-### 6.6 Step 4 — 비용 확인
+### 7.6 Step 4 — 비용 확인
 
 검토 화면에서 다음을 한 번에 확인한다.
 
@@ -459,7 +617,7 @@ Quote 유효 시간 = 15분
 
 후보 수가 2~4개면 각 금액도 후보 수에 비례한다. 항상 화면의 최신 server quote를 최종 기준으로 사용한다.
 
-### 6.7 생성 버튼이 활성화되는 조건
+### 7.7 생성 버튼이 활성화되는 조건
 
 다음 조건이 모두 충족되어야 한다.
 
@@ -475,7 +633,7 @@ Quote 유효 시간 = 15분
 상품, template, 출연 방식, 후보 수, CTA, 광고 목적, 채널, 고급 요청, reference,
 활성 prompt version 중 하나라도 바뀌면 기존 quote는 stale이 되고 새로 계산한다.
 
-### 6.8 영상 생성 시작 이후
+### 7.8 영상 생성 시작 이후
 
 1. Frontend가 생성 직전에 exact request body를 sessionStorage에 임시 저장한다.
 2. 동일 client_request_id를 body와 Idempotency-Key에 함께 넣는다.
@@ -490,7 +648,7 @@ Quote 유효 시간 = 15분
 버튼을 여러 번 누르거나 네트워크가 재전송하더라도 동일 ID와 동일 body는 같은 job을 반환한다.
 동일 ID에 다른 body를 붙이면 충돌로 거부한다.
 
-### 6.9 응답이 끊긴 요청 복구
+### 7.9 응답이 끊긴 요청 복구
 
 브라우저가 job ID를 받기 전에 응답이 끊겼다고 해서 새 생성 요청을 만들면 안 된다.
 
@@ -529,7 +687,7 @@ flowchart TD
 요청을 예약하지 못한 오류는 header/body를 바로잡은 뒤 동일 ID를 다시 쓸 수 있다. 확정된 거절인지
 불명확하면 새 유료 요청을 만들지 말고 접수 상태를 먼저 조회한다.
 
-### 6.10 이전 작업 설정 복사
+### 7.10 이전 작업 설정 복사
 
 작업 상세의 **설정 참고해 새 후보 만들기**를 누르면 /create?from_job={jobId}로 이동한다.
 
@@ -540,11 +698,11 @@ flowchart TD
 
 ---
 
-## 7. 작업 상세
+## 8. 작업 상세
 
 주소: /videos/{jobId}
 
-### 7.1 화면 구성
+### 8.1 화면 구성
 
 | 영역 | 확인 내용 |
 | --- | --- |
@@ -555,7 +713,7 @@ flowchart TD
 | 비용 | 예상값, provider 예상 상단, 실제 기록 |
 | 생성 설정 | template/version, 출연 방식, 채널, CTA, 광고 목적, prompt version/hash, 생성 시각 |
 
-### 7.2 생성 단계
+### 8.2 생성 단계
 
 ~~~mermaid
 stateDiagram-v2
@@ -608,13 +766,13 @@ TTS 길이가 scene budget을 넘으면 `script_tts_repair`가 스크립트 모�
 그래도 초과하면 deterministic 축약 또는 무음 fallback을 적용하는 TTS fallback 단계로 이동할 수
 있다. Provider video polling 상한은 현재 약 18분이며 timeout을 성공으로 간주하지 않는다.
 
-### 7.3 상단 버튼
+### 8.3 상단 버튼
 
 - **상태 새로고침:** 자동 polling을 기다리지 않고 즉시 최신 상태를 조회
 - **설정 참고해 새 후보 만들기:** 현재 설정을 새 create draft로 복사
 - Breadcrumb의 **영상 라이브러리:** 목록으로 돌아가기
 
-### 7.4 후보 카드
+### 8.4 후보 카드
 
 후보별로 다음 정보를 표시할 수 있다.
 
@@ -644,7 +802,7 @@ TTS 길이가 scene budget을 넘으면 `script_tts_repair`가 스크립트 모�
 파일은 404로 처리한다. 완료 파일은 HTTP Range 재생을 지원하며 download=true 요청은 attachment
 filename을 사용한다.
 
-### 7.5 후보 재시도
+### 8.5 후보 재시도
 
 후보별 paid retry는 현재 Studio UI에서 노출하거나 호출하지 않는다. Backend route는 parent job이
 terminal 상태이고, 후보가 FAILED이면서 `retryable=true`이고, 저장된 payload와 narration 파일이
@@ -656,7 +814,7 @@ terminal 상태이고, 후보가 FAILED이면서 `retryable=true`이고, 저장�
 - 추가 유료 요청에는 새 quote와 idempotency·attempt ledger가 필요하다.
 - 현재는 **설정 참고해 새 후보 만들기**로 이동하여 새 견적을 승인한다.
 
-### 7.6 스크립트 타임라인의 출처
+### 8.6 스크립트 타임라인의 출처
 
 화면 상단 설명으로 timeline provenance를 구분한다.
 
@@ -669,7 +827,7 @@ terminal 상태이고, 후보가 FAILED이면서 `retryable=true`이고, 저장�
 
 Legacy 작업에서 단순히 길이가 같다는 이유로 현재 template 내용을 실제 생성 script처럼 표시하지 않는다.
 
-### 7.7 오류·오프라인 동작
+### 8.7 오류·오프라인 동작
 
 - 최초 조회가 오프라인이면 연결 복구를 기다린다.
 - 기존 job을 본 적이 있으면 오류가 나도 마지막 성공 상태를 유지한다.
@@ -679,14 +837,14 @@ Legacy 작업에서 단순히 길이가 같다는 이유로 현재 template 내�
 
 ---
 
-## 8. 프롬프트 설정
+## 9. 프롬프트 설정
 
 주소: /settings/prompts
 
 이 메뉴는 실제 provider 작업에 사용하는 model-facing 지시문을 코드 배포 없이 관리한다.
 버전은 **전체 여섯 프롬프트를 묶은 하나의 bundle**이다.
 
-### 8.1 여섯 프롬프트
+### 9.1 여섯 프롬프트
 
 | Key | 화면 이름 | 역할 | 필수 token |
 | --- | --- | --- | --- |
@@ -700,7 +858,7 @@ Legacy 작업에서 단순히 길이가 같다는 이유로 현재 template 내�
 각 편집기에서 **허용 토큰 보기**를 열어 해당 template에서 사용할 수 있는 token을 확인한다.
 다른 template의 token을 임의로 가져오면 저장이 차단된다.
 
-### 8.2 화면 구조
+### 9.2 화면 구조
 
 | 영역 | 기능 |
 | --- | --- |
@@ -714,7 +872,7 @@ Legacy 작업에서 단순히 길이가 같다는 이유로 현재 template 내�
 **선택한 버전**과 **활성 버전**은 다를 수 있다. History에서 과거 버전을 열어 내용을 검토해도
 활성화 버튼을 확정하기 전까지 실제 신규 생성에는 영향을 주지 않는다.
 
-### 8.3 새 버전 저장 절차
+### 9.3 새 버전 저장 절차
 
 1. 왼쪽 **저장된 버전**에서 원본으로 사용할 버전을 선택한다.
 2. **버전 이름**을 입력한다.
@@ -729,7 +887,7 @@ Legacy 작업에서 단순히 길이가 같다는 이유로 현재 template 내�
 현재 UI는 prompt 본문이 하나 이상 실제로 변경되어야 저장 버튼이 활성화된다.
 버전 이름이나 변경 메모만 바꾼 metadata-only 버전은 만들 수 없다.
 
-### 8.4 활성화 절차
+### 9.4 활성화 절차
 
 1. 저장된 version history에서 적용할 버전을 선택한다.
 2. 편집 중인 미저장 변경이 없는지 확인한다.
@@ -744,7 +902,7 @@ job에 적용된다. 기존 quote record와 이미 접수·진행 중인 job의 
 다만 현재 Frontend는 active version 변경을 감지하면 Create 화면의 이전 quote를 제출에 사용하지 않고
 새 활성 버전으로 재견적한다. 기존 job의 TTS repair snapshot도 계속 원래 버전을 사용한다.
 
-### 8.5 Prompt version과 job snapshot
+### 9.5 Prompt version과 job snapshot
 
 ~~~mermaid
 flowchart LR
@@ -761,7 +919,7 @@ flowchart LR
     NEWQ --> NEWJOB["새 job<br/>여섯 본문 exact snapshot 저장"]
 ~~~
 
-### 8.6 과거 버전으로 되돌리기
+### 9.6 과거 버전으로 되돌리기
 
 Rollback도 버전 내용을 수정하는 것이 아니라 active pointer를 되돌리는 방식이다.
 
@@ -773,7 +931,7 @@ Rollback도 버전 내용을 수정하는 것이 아니라 active pointer를 되
 이미 생성한 v2 job이 v1로 바뀌지는 않는다. 각 job의 상세 화면에 저장된 prompt version과 hash가
 감사 기준이다.
 
-### 8.7 Token과 크기 검증
+### 9.7 Token과 크기 검증
 
 | 검증 | 규칙 |
 | --- | --- |
@@ -788,7 +946,7 @@ Token은 {{token_name}} 형식이다. Token 이름을 번역하거나 임의로 
 사용자 CTA·광고 목적 등은 구조화 데이터로 한 번만 삽입되며, 사용자 입력 안의 token 모양 문장은
 새 template 문법으로 다시 평가하지 않는다.
 
-### 8.8 미저장 변경 보호
+### 9.8 미저장 변경 보호
 
 - 편집 내용, 버전 이름, 변경 메모가 달라지면 미저장 상태로 취급한다.
 - 다른 버전 선택, server reload, 메뉴 이동, 브라우저 Back 전에 확인한다.
@@ -800,7 +958,7 @@ Token은 {{token_name}} 형식이다. Token 이름을 번역하거나 임의로 
 Session draft는 장기 저장소가 아니다. Browser storage 삭제, private mode 제한, 다른 기기·다른
 브라우저에서는 복구되지 않을 수 있으므로 중요한 변경은 반드시 새 immutable version으로 저장한다.
 
-### 8.9 프롬프트 변경 운영 규칙
+### 9.9 프롬프트 변경 운영 규칙
 
 권장 version 이름:
 
@@ -826,7 +984,7 @@ Session draft는 장기 저장소가 아니다. Browser storage 삭제, private 
 - Production 사용 전 4초 후보 1개의 제한된 canary로 확인한다.
 - 문제가 있으면 기존 안정 버전을 다시 활성화한다.
 
-### 8.10 동시 편집과 오류
+### 9.10 동시 편집과 오류
 
 - 두 운영자가 동시에 같은 next version number를 저장하면 한 요청은
   PROMPT_VERSION_CONFLICT 409로 거부될 수 있다.
@@ -837,11 +995,11 @@ Session draft는 장기 저장소가 아니다. Browser storage 삭제, private 
 
 ---
 
-## 9. Production 품질 검수
+## 10. Production 품질 검수
 
 기술 검수 통과는 곧바로 광고 사용 승인을 뜻하지 않는다.
 
-### 9.1 검수 계층
+### 10.1 검수 계층
 
 ~~~mermaid
 flowchart TD
@@ -860,7 +1018,7 @@ flowchart TD
     I -- "예" --> J["최종 사용 승인"]
 ~~~
 
-### 9.2 후보별 필수 체크리스트
+### 10.2 후보별 필수 체크리스트
 
 | 영역 | 확인할 내용 |
 | --- | --- |
@@ -891,7 +1049,7 @@ flowchart TD
 
 이 기준을 모두 통과해도 상품 의미, 인물 자연스러움, 한국어 발음과 광고 문구는 사람이 별도로 승인한다.
 
-### 9.3 권장 생성 순서
+### 10.3 권장 생성 순서
 
 1. Prompt version과 에셋을 먼저 검수한다.
 2. 상품만 또는 AI 가상 모델, 4초, 후보 1개로 가장 작은 canary를 만든다.
@@ -902,7 +1060,7 @@ flowchart TD
 
 ---
 
-## 10. Provider 선택 가이드
+## 11. Provider 선택 가이드
 
 | 목표 | 현재 권장 경로 | 이유 |
 | --- | --- | --- |
@@ -920,7 +1078,7 @@ Provider를 바꾸는 것만으로 다음 문제는 해결되지 않는다.
 - 전체 비용 원장과 hard cap
 - Durable worker와 artifact 저장
 
-### 10.1 현재 제공하지 않는 기능
+### 11.1 현재 제공하지 않는 기능
 
 다음 기능은 화면에 없거나 production 계약이 완성되지 않아 사용할 수 없다.
 
@@ -935,7 +1093,7 @@ Provider를 바꾸는 것만으로 다음 문제는 해결되지 않는다.
 
 ---
 
-## 11. 오류 상황별 대응
+## 12. 오류 상황별 대응
 
 | 증상 또는 코드 | 의미 | 권장 행동 |
 | --- | --- | --- |
@@ -962,7 +1120,7 @@ Provider를 바꾸는 것만으로 다음 문제는 해결되지 않는다.
 
 ---
 
-## 12. 자주 묻는 질문
+## 13. 자주 묻는 질문
 
 ### 저장한 프롬프트가 바로 영상 생성에 적용되나요?
 
@@ -1005,12 +1163,28 @@ production capability가 검증되지 않았기 때문이다.
 현재 후보 선택은 상세 화면의 비교 상태다. 최종 승인 후보를 영구 저장하는 별도 승인 workflow는
 아직 없으므로 다운로드 파일과 운영 기록으로 확정해야 한다.
 
+### 상품을 저장하면 바로 새 영상 만들기에 나오나요?
+
+아니다. 신규 등록과 수정은 항상 **검수 대기** 상태가 된다. 대표 이미지와 상품·옵션·수량·주장을
+사람이 확인하고 검수 근거와 checkbox를 제출해 활성화한 최신 revision만 생성 화면에 표시된다.
+
+### 상품을 수정했는데 목록에서 사라진 이유는 무엇인가요?
+
+활성 상품도 내용을 수정하면 기존 검수 확인을 재사용하지 않고 자동 비활성화한다. 광고 상품 관리의
+검수 대기 필터에서 수정본을 연 뒤 다시 의미 검수를 완료하고 활성화한다.
+
 ---
 
-## 13. 화면과 API 대응표
+## 14. 화면과 API 대응표
 
 | 화면 기능 | API | 쓰기 여부 | 영상 provider 생성 |
 | --- | --- | --- | --- |
+| 상품 목록 | GET /api/v1/reels/products?include_inactive=true | 읽기 | 없음 |
+| 상품 검수 대기 등록 | POST /api/v1/reels/products | DB 쓰기·자산 기술 검사 | 영상 생성 없음 |
+| 상품 수정 | PUT /api/v1/reels/products/{productId} | DB 쓰기·revision 증가·자동 비활성화 | 영상 생성 없음 |
+| 상품 의미 검수·활성화 | POST /api/v1/reels/products/{productId}/activate | DB 쓰기·검수 근거 저장 | 없음 |
+| 상품 비활성화 | POST /api/v1/reels/products/{productId}/deactivate | DB 쓰기 | 없음 |
+| 상품 보관 | DELETE /api/v1/reels/products/{productId} | Soft archive | 없음 |
 | Prompt history 조회 | GET /api/v1/reels/prompt-versions | 읽기 | 없음 |
 | Prompt 새 버전 저장 | POST /api/v1/reels/prompt-versions | DB 쓰기 | 없음 |
 | Prompt 활성화 | POST /api/v1/reels/prompt-versions/{id}/activate | DB 쓰기 | 없음 |
@@ -1025,12 +1199,12 @@ production capability가 검증되지 않았기 때문이다.
 
 ---
 
-## 14. 공개 Production 전 필수 조건
+## 15. 공개 Production 전 필수 조건
 
 ~~~mermaid
 flowchart TB
     LOCAL["현재 로컬 Studio GO"]
-    LOCAL --> SECURITY["인증·Owner scope·Prompt RBAC·CSRF<br/>사용자별 동시 job·rate limit·abuse control<br/>Actor audit·민감 로그 redaction"]
+    LOCAL --> SECURITY["인증·Owner scope·Prompt 및 상품 mutation RBAC·CSRF<br/>사용자별 동시 job·rate limit·abuse control<br/>Actor audit·민감 로그 redaction"]
     LOCAL --> QUEUE["Durable queue·Transactional outbox·Worker lease<br/>heartbeat·dead-letter·restart checkpoint recovery"]
     LOCAL --> PROVIDER["Provider operation locator 영속화<br/>timeout·cancellation·실제 청구 reconciliation"]
     LOCAL --> STORE["Object storage·Signed URL<br/>Checksum·Retention"]
@@ -1051,19 +1225,24 @@ flowchart TB
     GATE -- "아니오" --> NOGO["Public Production NO-GO 유지"]
 ~~~
 
-위 조건이 없는 현재 설정 API를 공개 인터넷에 노출하면 안 된다.
+현재 Backend API 자체에는 운영자 인증이 없다. 위 조건이 없는 현재 설정 API와 상품 등록·수정·
+활성화·비활성화·보관 mutation API를 공개 인터넷에 노출하면 안 된다. 화면에서 메뉴나 버튼을
+숨기는 것은 권한 통제가 아니므로 공개 전 서버 또는 인증 reverse proxy에서 상품 운영자 RBAC를
+강제해야 한다.
 민감 로그 redaction에는 API key뿐 아니라 signed URL, 인물 reference URL과 private request payload가
 로그·오류 응답·관측 도구에 남지 않는지 확인하는 절차가 포함된다.
 로컬 health, 테스트 통과, 유효한 MP4는 공개 production 운영 증거를 대신하지 않는다.
 
 ---
 
-## 15. 운영자 최종 체크리스트
+## 16. 운영자 최종 체크리스트
 
 ### 생성 전
 
 - [ ] 활성 prompt version 이름과 version을 확인했다.
-- [ ] 상품 에셋의 의미·수량·작은 글자 한계를 확인했다.
+- [ ] 광고 상품 관리에서 최신 상품 revision이 활성 상태인지 확인했다.
+- [ ] 대표·상세 이미지가 실제 상품·옵션과 일치하고 사용 권리가 있는지 확인했다.
+- [ ] 상품 에셋의 의미·수량·작은 글자 한계를 검수 근거에 기록했다.
 - [ ] 목표 길이와 scene plan을 확인했다.
 - [ ] CTA와 광고 목적에 검증되지 않은 주장이 없다.
 - [ ] 출연 방식이 provider capability와 맞는다.
@@ -1095,9 +1274,17 @@ flowchart TB
 - [ ] 기존 job의 prompt snapshot이 바뀌지 않았음을 확인했다.
 - [ ] 제한된 canary와 human review를 거쳤다.
 
+### 상품 변경 후
+
+- [ ] 수정본이 자동 비활성화됐음을 확인했다.
+- [ ] 기술 검증 통과와 실제 상품 의미 검수를 구분했다.
+- [ ] 검수 근거를 비워 두지 않고 직접 확인한 사실과 사용 제한을 기록했다.
+- [ ] 최신 revision을 다시 활성화한 뒤 /create에서 해당 상품을 새로 선택했다.
+- [ ] 보관은 기존 영상 기록을 삭제하지 않는 soft archive임을 확인했다.
+
 ---
 
-## 16. 관련 문서
+## 17. 관련 문서
 
 - [프로젝트 설치·환경변수·실행·운영 가이드](./project-setup-and-operations-guide.ko.md)
 - [Frontend 개요와 실행 계약](../README.md)

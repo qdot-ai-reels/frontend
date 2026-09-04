@@ -1,12 +1,14 @@
 'use client';
 
-import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+
+import { GuardedLink as Link } from './navigation-guard';
 
 const NAV_ITEMS = [
   { href: '/videos', label: '영상 라이브러리', shortLabel: '라이브러리', icon: '▦' },
   { href: '/create', label: '새 영상 만들기', shortLabel: '새 영상', icon: '+' },
-  { href: '/settings/prompts', label: '프롬프트 설정', shortLabel: '프롬프트', icon: 'P' },
+  { href: '/products', label: '광고 상품 관리', shortLabel: '상품', icon: 'P' },
+  { href: '/settings/prompts', label: '프롬프트 설정', shortLabel: '프롬프트', icon: '⌘' },
 ] as const;
 
 export function StudioNav() {

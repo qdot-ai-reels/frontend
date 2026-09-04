@@ -12,6 +12,7 @@
 - `/videos`: 서버 작업 목록, 서버 상태 필터, 현재까지 불러온 페이지 대상 검색·길이 필터, 진행 작업 자동 갱신
 - `/videos/[jobId]`: 작업 단계, 저장된 실제 스크립트 타임라인, 비용, 후보 재생·다운로드
 - `/create`: 상품 → 4/6/8/15초 전략 → 크리에이티브 → 서버 견적 순서의 생성 위저드
+- `/products`: 광고 상품 등록·편집, 자산 기술 점검, 사람의 의미 검수, 활성·비활성·soft archive
 - `/settings/prompts`: 실제 스크립트·영상 프롬프트의 불변 버전 저장, 토큰 검증, 활성 버전 전환
 - `/?job=<jobId>&product_id=<legacyProductId>`: 기존 북마크 호환을 위해 job 상세로 이동합니다. 상세 조회에는 현재 상품 allowlist가 필요하지 않습니다.
 
@@ -53,15 +54,35 @@ NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED=false
 
 ## 생성과 견적 계약
 
-1. `GET /api/v1/reels/prompt-versions`로 현재 활성 프롬프트 bundle을 확인합니다. 활성 버전을 확인하지 못하면 견적과 생성을 fail-closed로 잠급니다.
-2. `GET /api/v1/reels/generation-templates`로 서버가 지원하는 4/6/8/15초 템플릿과 정확한 장면 구간을 읽습니다.
-3. 필수 입력 완료 후 `POST /api/v1/reels/generation-quotes`로 현재 모델·1080p·후보 수·활성 `prompt_version_id` 기준 provider 예상 범위를 받습니다. 범위 상단은 결제 승인이나 강제 상한이 아닙니다.
-4. 설정이 하나라도 바뀌거나 견적이 만료되면 기존 quote는 즉시 무효화합니다.
-5. fresh quote가 있을 때만 `POST /api/v1/reels/generate`를 한 번 호출합니다. frontend는 프롬프트 문자열을 만들지 않고 `prompt_version_id`, 구조화된 `creative_brief`, `template_id`, `template_version`, `quote_id`, 안정적인 `client_request_id`를 보냅니다.
-6. 응답이 끊긴 pending 요청은 `GET /api/v1/reels/generation-requests/{clientRequestId}`로 조회합니다. 한 번의 404로 잠금을 풀지 않으며, 명시적 복구 때만 동일 본문·동일 ID POST를 재사용합니다. `REQUOTE_REQUIRED` 또는 `QUOTE_NOT_FOUND`는 기존 job이 없음을 idempotency 검사 뒤 확인한 응답이므로 그때만 fresh quote로 돌아갑니다.
-7. `GET /api/v1/reels/generate/{jobId}`를 visibility·online 상태와 지수 backoff를 반영해 polling합니다.
-8. `COMPLETED`, `PARTIAL_COMPLETED`, `FAILED`에서 자동 polling을 멈춥니다.
-9. 후보 retry는 추가 비용 견적·멱등 계약이 없어 Studio UI에서 호출하지 않습니다. 실패 시 이전 설정을 참고해 새 작업을 만들고 fresh quote를 확인합니다.
+1. `GET /api/v1/reels/products`로 활성·비보관 상품과 authoritative `revision`을 읽습니다. 정적 fixture를 template 생성 요청에 사용하지 않습니다.
+2. `GET /api/v1/reels/prompt-versions`로 현재 활성 프롬프트 bundle을 확인합니다. 활성 버전을 확인하지 못하면 견적과 생성을 fail-closed로 잠급니다.
+3. `GET /api/v1/reels/generation-templates`로 서버가 지원하는 4/6/8/15초 템플릿과 정확한 장면 구간을 읽습니다.
+4. 필수 입력 완료 후 `POST /api/v1/reels/generation-quotes`로 현재 모델·1080p·후보 수·활성 `prompt_version_id` 기준 provider 예상 범위를 받습니다. 범위 상단은 결제 승인이나 강제 상한이 아닙니다.
+5. 설정이 하나라도 바뀌거나 견적이 만료되면 기존 quote는 즉시 무효화합니다.
+6. fresh quote가 있을 때만 `POST /api/v1/reels/generate`를 한 번 호출합니다. frontend는 프롬프트 문자열을 만들지 않고 `product_id`, `product_catalog_revision`, `prompt_version_id`, 구조화된 `creative_brief`, `template_id`, `template_version`, `quote_id`, 안정적인 `client_request_id`를 보냅니다.
+7. Backend가 상품 revision 변경을 반환하면 오래 열린 Create snapshot을 보내지 않고 최신 활성 상품을 다시 선택합니다.
+8. 응답이 끊긴 pending 요청은 `GET /api/v1/reels/generation-requests/{clientRequestId}`로 조회합니다. 한 번의 404로 잠금을 풀지 않으며, 명시적 복구 때만 동일 본문·동일 ID POST를 재사용합니다. `REQUOTE_REQUIRED` 또는 `QUOTE_NOT_FOUND`는 기존 job이 없음을 idempotency 검사 뒤 확인한 응답이므로 그때만 fresh quote로 돌아갑니다.
+9. `GET /api/v1/reels/generate/{jobId}`를 visibility·online 상태와 지수 backoff를 반영해 polling합니다.
+10. `COMPLETED`, `PARTIAL_COMPLETED`, `FAILED`에서 자동 polling을 멈춥니다.
+11. 후보 retry는 추가 비용 견적·멱등 계약이 없어 Studio UI에서 호출하지 않습니다. 실패 시 이전 설정을 참고해 새 작업을 만들고 fresh quote를 확인합니다.
+
+## 상품 카탈로그 계약
+
+`/products`의 신규 상품은 항상 `is_active=false`로 저장됩니다. 대표·상세 이미지 URL을 변경하면
+Backend가 공개 HTTPS와 실제 다운로드 파일의 provider 기술 규격을 다시 검사합니다. 카탈로그의
+모든 이미지는 각각 15 MiB 이하의 JPEG/JPG, PNG 또는 WebP, 가로·세로 512px 이상, 최대 4:1
+비율이어야 하며 상세 이미지 하나라도 부적합하면 저장 전체를 거부합니다. 기술 검사와 상품 의미
+검수는 별개이므로 활성화에는 `asset_review_acknowledged=true`, 비어 있지 않은 `review_note`,
+현재 `expected_revision`이 모두 필요합니다.
+
+편집은 어떤 필드든 성공하면 자동 비활성화하고 revision을 올립니다. 활성화, 비활성화, 편집,
+soft archive 모두 optimistic concurrency를 사용해 stale 화면의 덮어쓰기를 409로 차단합니다.
+단, 이미 보관된 상품에 같은 archive 요청을 재전송하면 stale revision이어도 멱등 성공으로 현재
+상품을 200 반환합니다. 보관 상품은 삭제하지 않으며 같은 검수 절차로 복구·활성화할 수 있습니다.
+
+현재 상품 API 자체에는 운영자 인증이 없습니다. 공개 production 전에는 서버 또는 인증 reverse
+proxy에서 상품 등록·수정·활성화·비활성화·보관에 operator RBAC를 강제해야 하며, UI에서 메뉴나
+버튼을 숨기는 것만으로 권한을 통제해서는 안 됩니다.
 
 ## 프롬프트 버전 계약
 
@@ -75,7 +96,11 @@ NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED=false
 
 ## Production 에셋 경계
 
-[data/production-products.ts](./data/production-products.ts)는 원본 비공개 카탈로그 대신 승인된 최소 레코드만 client bundle에 포함합니다. 현재 30포 사과주스 판매 상품의 대표 에셋은 파우치 1개 이미지이고 `semanticallyExactProductCount=0`입니다. 따라서 생성·상세 화면 모두 아래 제한을 명시합니다.
+[data/production-products.ts](./data/production-products.ts)는 초기 자산 감사와 seed 근거를 보존하는
+레거시 최소 레코드이며, template 기반 생성의 runtime 권한은 Backend 상품 카탈로그다. 카탈로그에
+저장됐다는 사실만으로 의미가 정확하다고 간주하지 않으며, 활성화 dialog에서 실제 상품과 자산을
+사람이 직접 확인한다. 초기 30포 사과주스 대표 에셋은 파우치 1개 이미지이고
+`semanticallyExactProductCount=0`이므로 다음 제한을 유지한다.
 
 - 판매 수량 30포를 영상 속 패키지 수로 주장하지 않습니다.
 - 패키지의 작은 글자와 세부 표기는 시각적으로 검증됐다고 표시하지 않습니다.

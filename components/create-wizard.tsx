@@ -1,19 +1,32 @@
 'use client';
 
-import Image from 'next/image';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
 import {
-  PRODUCTION_ASSET_AUDIT,
-  PRODUCTION_PRODUCTS,
-} from '@/data/production-products';
+  GuardedLink as Link,
+  usePageNavigationGuard,
+} from '@/components/navigation-guard';
+import { PRODUCTION_ASSET_AUDIT } from '@/data/production-products';
+import {
+  CREATE_DRAFT_STORAGE_KEY,
+  parseStoredCreateDraft,
+  serializeCreateDraft,
+} from '@/lib/create-draft-storage';
 import {
   DEFAULT_INFLUENCER_REFERENCE_URLS,
   activeInfluencerReferenceUrls,
   validateInfluencerReferenceUrl,
 } from '@/lib/influencer-references';
+import { productCatalogApi } from '@/lib/product-catalog-api';
+import { isProductAvailableForGeneration } from '@/lib/product-catalog';
 import {
   LOCAL_TEMPLATE_FALLBACKS,
   StudioApiError,
@@ -37,12 +50,15 @@ import type {
   PendingGenerationSnapshot,
   PendingSubmission,
 } from '@/lib/studio-normalization';
+import type { StoredCreateDraft } from '@/lib/create-draft-storage';
 import type { VisualMode } from '@/types/reels';
+import type { CatalogProduct } from '@/types/product-catalog';
 import type {
   CreateDraft,
   GenerationQuote,
   GenerationTemplate,
   PromptVersionReference,
+  StartGenerationInput,
 } from '@/types/studio';
 
 type WizardStep = 'product' | 'template' | 'creative' | 'review';
@@ -54,9 +70,7 @@ const STEPS: { key: WizardStep; label: string }[] = [
   { key: 'review', label: '비용 확인' },
 ];
 
-function initialDraft(): CreateDraft | null {
-  const product = PRODUCTION_PRODUCTS[0];
-  if (!product) return null;
+function initialDraft(product: CatalogProduct | null): CreateDraft {
   return {
     product,
     template: null,
@@ -79,7 +93,8 @@ function messageOf(error: unknown): string {
 
 function quoteSignature(draft: CreateDraft): string {
   return JSON.stringify({
-    productId: draft.product.productId,
+    productId: draft.product?.productId ?? null,
+    productRevision: draft.product?.revision ?? null,
     template: draft.template ? [draft.template.id, draft.template.version] : null,
     visualMode: draft.visualMode,
     outputCount: draft.outputCount,
@@ -120,9 +135,11 @@ function persistPendingSubmission(value: PendingSubmission): boolean {
 }
 
 function snapshotDraft(draft: CreateDraft): PendingGenerationSnapshot {
+  if (!draft.product) throw new Error('생성할 상품이 없습니다.');
   if (!draft.template) throw new Error('생성할 템플릿이 없습니다.');
   return {
     productId: draft.product.productId,
+    productRevision: draft.product.revision,
     templateId: draft.template.id,
     templateVersion: draft.template.version,
     visualMode: draft.visualMode,
@@ -144,17 +161,20 @@ function snapshotDraft(draft: CreateDraft): PendingGenerationSnapshot {
 function restorePendingDraft(
   pending: PendingSubmission,
   templates: GenerationTemplate[],
+  products: CatalogProduct[],
 ): CreateDraft | null {
   if (!pending.request) return null;
-  const product = PRODUCTION_PRODUCTS.find(
-    (candidate) => candidate.productId === pending.request?.productId,
-  );
+  const product = products.find(
+    (candidate) =>
+      candidate.productId === pending.request?.productId &&
+      candidate.revision === pending.request?.productRevision &&
+      isProductAvailableForGeneration(candidate),
+  ) ?? null;
   const template = templates.find(
     (candidate) =>
       candidate.id === pending.request?.templateId &&
       candidate.version === pending.request?.templateVersion,
-  );
-  if (!product || !template) return null;
+  ) ?? null;
   return {
     product,
     template,
@@ -171,6 +191,50 @@ function restorePendingDraft(
   };
 }
 
+function safeRestoredStep(draft: CreateDraft, requested: WizardStep): WizardStep {
+  if (!draft.product) return 'product';
+  if (!draft.template && (requested === 'creative' || requested === 'review')) return 'template';
+  return requested;
+}
+
+function restoreTemporaryDraft(
+  stored: StoredCreateDraft,
+  products: CatalogProduct[],
+  templates: GenerationTemplate[],
+  promptVersionId: string | null,
+): CreateDraft {
+  const product = stored.productId && stored.productRevision
+    ? products.find(
+        (candidate) =>
+          candidate.productId === stored.productId &&
+          candidate.revision === stored.productRevision &&
+          isProductAvailableForGeneration(candidate),
+      ) ?? null
+    : null;
+  const template = stored.templateId && stored.templateVersion
+    ? templates.find(
+        (candidate) =>
+          candidate.id === stored.templateId &&
+          candidate.version === stored.templateVersion &&
+          candidate.supported,
+      ) ?? null
+    : null;
+  return {
+    product,
+    template,
+    visualMode: stored.visualMode,
+    influencerImageUrls: [...stored.influencerImageUrls],
+    outputCount: stored.outputCount,
+    cta: stored.cta,
+    advertisingPurpose: stored.advertisingPurpose,
+    channel: stored.channel,
+    mustInclude: stored.mustInclude,
+    mustExclude: stored.mustExclude,
+    extraDetails: stored.extraDetails,
+    promptVersionId,
+  };
+}
+
 type PendingLookupStatus =
   | 'idle'
   | 'checking'
@@ -183,7 +247,15 @@ type PendingLookupStatus =
 export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const router = useRouter();
   const [step, setStep] = useState<WizardStep>('product');
-  const [draft, setDraft] = useState<CreateDraft | null>(() => initialDraft());
+  const [draft, setDraft] = useState<CreateDraft>(() => initialDraft(null));
+  const [draftTouched, setDraftTouched] = useState(false);
+  const [draftRestoreChecked, setDraftRestoreChecked] = useState(false);
+  const [draftRestoreNotice, setDraftRestoreNotice] = useState<string | null>(null);
+  const [draftStorageError, setDraftStorageError] = useState<string | null>(null);
+  const [products, setProducts] = useState<CatalogProduct[]>([]);
+  const [productsLoading, setProductsLoading] = useState(true);
+  const [productsError, setProductsError] = useState<string | null>(null);
+  const [productsNonce, setProductsNonce] = useState(0);
   const [templates, setTemplates] = useState<GenerationTemplate[]>(LOCAL_TEMPLATE_FALLBACKS);
   const [templatesLoading, setTemplatesLoading] = useState(true);
   const [templateWarning, setTemplateWarning] = useState<string | null>(null);
@@ -198,6 +270,10 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [copiedFromJob, setCopiedFromJob] = useState(false);
+  const [sourceCopyState, setSourceCopyState] = useState({
+    sourceJobId,
+    loading: Boolean(sourceJobId),
+  });
   const [clientRequestId, setClientRequestId] = useState(createRequestId);
   const [pendingRecovery, setPendingRecovery] = useState<ReturnType<
     typeof parsePendingSubmission
@@ -217,6 +293,49 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const pendingLookupFailuresRef = useRef(0);
   const submittingRef = useRef(false);
   const quoteVersionRecoveryAttemptsRef = useRef(0);
+  const activePromptVersionRef = useRef<PromptVersionReference | null>(null);
+  const catalogInitializedRef = useRef(false);
+  const draftRef = useRef(draft);
+  const stepRef = useRef(step);
+  useLayoutEffect(() => {
+    draftRef.current = draft;
+    stepRef.current = step;
+  }, [draft, step]);
+
+  const persistLatestDraft = useCallback(() => {
+    try {
+      window.sessionStorage.setItem(
+        CREATE_DRAFT_STORAGE_KEY,
+        serializeCreateDraft(draftRef.current, stepRef.current),
+      );
+      setDraftStorageError(null);
+      return true;
+    } catch {
+      setDraftStorageError(
+        '브라우저 임시 저장을 사용할 수 없습니다. 이 페이지에서 생성을 완료해 주세요.',
+      );
+      return false;
+    }
+  }, []);
+
+  const clearTemporaryDraft = useCallback(() => {
+    try {
+      window.sessionStorage.removeItem(CREATE_DRAFT_STORAGE_KEY);
+    } catch {
+      // A pending submission remains the durable duplicate-generation guard.
+    }
+  }, []);
+
+  usePageNavigationGuard({
+    hasUnsavedChanges: draftTouched,
+    busy: submitting,
+    confirmMessage:
+      '작성 중인 영상 설정은 이 탭에 임시 저장됩니다. 현재 화면을 이동할까요?',
+    beforeNavigate: draftTouched ? persistLatestDraft : undefined,
+    onBusyBlocked: () => {
+      setSubmitError('생성 요청 확인이 끝난 뒤 페이지를 이동해 주세요.');
+    },
+  });
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -235,6 +354,57 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    productCatalogApi
+      .listProducts({}, controller.signal)
+      .then((catalog) => {
+        if (controller.signal.aborted) return;
+        const available = catalog.items.filter(isProductAvailableForGeneration);
+        setProducts(available);
+        setProductsError(null);
+        const selected = draftRef.current.product;
+        if (selected) {
+          const refreshed = available.find(
+            (product) => product.productId === selected.productId,
+          );
+          if (refreshed?.revision === selected.revision) {
+            setDraft((current) => ({ ...current, product: refreshed }));
+          } else {
+            setDraft((current) => ({ ...current, product: null }));
+            setDraftTouched(true);
+            setDraftRestoreNotice(
+              '선택했던 상품이 변경되었거나 비활성화되어 상품 선택만 해제했습니다. 나머지 영상 설정은 보존했습니다.',
+            );
+          }
+        } else if (!catalogInitializedRef.current && available[0]) {
+          setDraft((current) => ({
+            ...current,
+            product: available[0],
+            promptVersionId:
+              current.promptVersionId ?? activePromptVersionRef.current?.id ?? null,
+          }));
+        }
+        catalogInitializedRef.current = true;
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setProducts([]);
+        if (draftRef.current.product) {
+          setDraft((current) => ({ ...current, product: null }));
+          setDraftTouched(true);
+          setDraftRestoreNotice(
+            '상품 카탈로그를 확인할 수 없어 상품 선택만 안전하게 해제했습니다. 나머지 입력은 보존했습니다.',
+          );
+        }
+        setProductsError(messageOf(error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProductsLoading(false);
+      });
+    return () => controller.abort();
+  }, [productsNonce]);
 
   useEffect(() => {
     if (!pendingRecovery) return;
@@ -262,6 +432,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           pendingLookupFailuresRef.current = 0;
           if (request.requestState === 'ACCEPTED' && request.jobId) {
             clearPendingSubmission();
+            clearTemporaryDraft();
+            setDraftTouched(false);
             setPendingRecovery(null);
             setCorruptPendingRecovery(false);
             try {
@@ -295,7 +467,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
             return;
           }
 
-          const restored = restorePendingDraft(pendingRecovery, templates);
+          const restored = restorePendingDraft(pendingRecovery, templates, products);
           const restoredForNewRequest = restored
             ? { ...restored, promptVersionId: activePromptVersion?.id ?? null }
             : null;
@@ -309,15 +481,24 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           setClientRequestId(createRequestId());
           setQuote(null);
           setQuoteForSignature(null);
-          if (restoredForNewRequest) setDraft(restoredForNewRequest);
-          if (disposition === 'requote' && restoredForNewRequest) {
+          if (restoredForNewRequest) {
+            setDraft(restoredForNewRequest);
+            setDraftTouched(true);
+          }
+          if (
+            disposition === 'requote' &&
+            restoredForNewRequest?.product &&
+            restoredForNewRequest.template
+          ) {
             setStep('review');
             setQuoteNonce((value) => value + 1);
             setSubmitError(
               `${rejection?.message ?? '기존 견적을 사용할 수 없습니다.'}${rejection?.code ? ` [${rejection.code}]` : ''} 서버가 원 요청을 거절 완료해 최신 견적으로 돌아갑니다.`,
             );
           } else {
-            if (restoredForNewRequest) setStep('creative');
+            if (restoredForNewRequest) {
+              setStep(safeRestoredStep(restoredForNewRequest, 'creative'));
+            }
             setSubmitError(
               `${rejection?.message ?? '서버가 원 요청을 거절했습니다.'}${rejection?.code ? ` [${rejection.code}]` : ''} 입력을 확인한 뒤 다시 시도해 주세요.`,
             );
@@ -367,7 +548,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       document.removeEventListener('visibilitychange', resume);
       window.removeEventListener('online', resume);
     };
-  }, [activePromptVersion?.id, pendingLookupNonce, pendingRecovery, router, templates]);
+  }, [activePromptVersion?.id, clearTemporaryDraft, pendingLookupNonce, pendingRecovery, products, router, templates]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -394,18 +575,20 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       .then((catalog) => {
         const reference = getActivePromptVersionReference(catalog);
         if (!reference) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+        activePromptVersionRef.current = reference;
         setActivePromptVersion(reference);
         setPromptVersionError(null);
         setDraft((current) =>
-          current && !current.promptVersionId
+          !current.promptVersionId
             ? { ...current, promptVersionId: reference.id }
             : current,
         );
       })
       .catch((error) => {
         if (controller.signal.aborted) return;
+        activePromptVersionRef.current = null;
         setActivePromptVersion(null);
-        setDraft((current) => current && ({ ...current, promptVersionId: null }));
+        setDraft((current) => ({ ...current, promptVersionId: null }));
         setPromptVersionError(messageOf(error));
       })
       .finally(() => {
@@ -417,20 +600,21 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   useEffect(() => {
     if (
       !pendingRecovery ||
+      productsLoading ||
       templatesLoading ||
       restoredPendingRef.current === pendingRecovery.clientRequestId
     ) return;
     restoredPendingRef.current = pendingRecovery.clientRequestId;
     const timer = window.setTimeout(() => {
-      const restored = restorePendingDraft(pendingRecovery, templates);
+      const restored = restorePendingDraft(pendingRecovery, templates, products);
       if (!restored) return;
       setDraft(restored);
-      setStep('review');
+      setStep(safeRestoredStep(restored, 'review'));
       setQuote(null);
       setQuoteForSignature(null);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [pendingRecovery, templates, templatesLoading]);
+  }, [pendingRecovery, products, productsLoading, templates, templatesLoading]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -452,11 +636,93 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }, []);
 
   useEffect(() => {
+    if (draftRestoreChecked) return;
+    if (sourceJobId) {
+      const timer = window.setTimeout(() => setDraftRestoreChecked(true), 0);
+      return () => window.clearTimeout(timer);
+    }
+    if (productsLoading || templatesLoading || promptVersionLoading) return;
+
+    const timer = window.setTimeout(() => {
+      try {
+        const pending = parsePendingSubmission(
+          window.sessionStorage.getItem(PENDING_SUBMISSION_KEY),
+        );
+        if (pending) {
+          setDraftRestoreChecked(true);
+          return;
+        }
+        const raw = window.sessionStorage.getItem(CREATE_DRAFT_STORAGE_KEY);
+        const stored = parseStoredCreateDraft(raw);
+        if (raw && !stored) {
+          window.sessionStorage.removeItem(CREATE_DRAFT_STORAGE_KEY);
+          setDraftStorageError(
+            '손상된 영상 임시 저장 기록을 삭제했습니다. 현재 설정을 다시 확인해 주세요.',
+          );
+        } else if (stored) {
+          const restored = restoreTemporaryDraft(
+            stored,
+            products,
+            templates,
+            activePromptVersion?.id ?? null,
+          );
+          setDraft(restored);
+          setStep(safeRestoredStep(restored, stored.step));
+          setDraftTouched(true);
+          setDraftRestoreNotice(
+            stored.productId && !restored.product
+              ? '임시 저장된 입력을 복구했습니다. 상품 revision이 변경되었거나 비활성화되어 상품만 다시 선택해 주세요.'
+              : '이 탭에 임시 저장된 영상 설정을 복구했습니다.',
+          );
+        }
+      } catch {
+        setDraftStorageError(
+          '브라우저 임시 저장을 읽지 못했습니다. 현재 페이지에서 입력을 다시 확인해 주세요.',
+        );
+      } finally {
+        setDraftRestoreChecked(true);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    activePromptVersion?.id,
+    draftRestoreChecked,
+    products,
+    productsLoading,
+    promptVersionLoading,
+    sourceJobId,
+    templates,
+    templatesLoading,
+  ]);
+
+  useEffect(() => {
+    if (
+      !draftRestoreChecked ||
+      !draftTouched ||
+      pendingRecovery ||
+      corruptPendingRecovery
+    ) return;
+    const timer = window.setTimeout(() => {
+      persistLatestDraft();
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [
+    corruptPendingRecovery,
+    draft,
+    draftRestoreChecked,
+    draftTouched,
+    pendingRecovery,
+    persistLatestDraft,
+    step,
+  ]);
+
+  useEffect(() => {
     if (
       !sourceJobId ||
       pendingRecovery ||
       corruptPendingRecovery ||
       copiedRef.current === sourceJobId ||
+      productsLoading ||
       templatesLoading ||
       providerCapability.loading
     ) return;
@@ -464,7 +730,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
     studioApi
       .getGeneration(sourceJobId, controller.signal)
       .then((job) => {
-        const product = PRODUCTION_PRODUCTS.find(
+        copiedRef.current = sourceJobId;
+        const product = products.find(
           (candidate) => candidate.productId === job.product.productId,
         );
         const template = templates.find(
@@ -478,7 +745,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           return;
         }
         const cannotRestoreIdentity = job.options.visualMode === 'model_included';
-        setDraft((current) => current && ({
+        setDraft((current) => ({
           ...current,
           product,
           template,
@@ -497,11 +764,11 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           mustExclude: job.options.mustExclude ?? current.mustExclude,
           extraDetails: job.options.extraDetails ?? current.extraDetails,
         }));
+        setDraftTouched(true);
         setQuote(null);
         setQuoteForSignature(null);
         setClientRequestId(createRequestId());
         setCopiedFromJob(true);
-        copiedRef.current = sourceJobId;
         if (cannotRestoreIdentity) {
           setSubmitError(
             providerCapability.supportsIdentityReference
@@ -518,18 +785,30 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           copiedRef.current = sourceJobId;
           setSubmitError(`이전 설정을 불러오지 못했습니다. ${messageOf(error)}`);
         }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setSourceCopyState({ sourceJobId, loading: false });
+        }
       });
     return () => controller.abort();
-  }, [corruptPendingRecovery, pendingRecovery, providerCapability, sourceJobId, templates, templatesLoading]);
+  }, [corruptPendingRecovery, pendingRecovery, products, productsLoading, providerCapability, sourceJobId, templates, templatesLoading]);
 
-  const signature = useMemo(() => (draft ? quoteSignature(draft) : ''), [draft]);
+  const signature = useMemo(() => quoteSignature(draft), [draft]);
+  const hasPendingRecovery = Boolean(pendingRecovery || corruptPendingRecovery);
+  const sourceCopyLoading = Boolean(
+    sourceJobId &&
+    (sourceCopyState.sourceJobId !== sourceJobId || sourceCopyState.loading),
+  );
   const canRequestQuote = Boolean(
       !pendingRecovery &&
       !corruptPendingRecovery &&
       !promptVersionLoading &&
-      draft?.promptVersionId &&
+      draft.promptVersionId &&
+      draft.product &&
+      isProductAvailableForGeneration(draft.product) &&
       draft.promptVersionId === activePromptVersion?.id &&
-      draft?.template?.supported &&
+      draft.template?.supported &&
       draft.cta.trim() &&
       draft.advertisingPurpose.trim() &&
       (draft.visualMode !== 'model_included' ||
@@ -538,7 +817,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   );
 
   useEffect(() => {
-    if (!draft || step !== 'review' || !canRequestQuote) return;
+    if (step !== 'review' || !canRequestQuote) return;
 
     const controller = new AbortController();
     let expiryTimer: number | null = null;
@@ -577,12 +856,11 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               if (controller.signal.aborted) return;
               const refreshed = getActivePromptVersionReference(catalog);
               if (!refreshed) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+              activePromptVersionRef.current = refreshed;
               setActivePromptVersion(refreshed);
               setPromptVersionError(null);
               if (refreshed.id !== draft.promptVersionId) {
-                setDraft((current) =>
-                  current ? { ...current, promptVersionId: refreshed.id } : current,
-                );
+                setDraft((current) => ({ ...current, promptVersionId: refreshed.id }));
                 setQuoteError(
                   '견적 계산 중 활성 프롬프트가 변경되어 최신 버전으로 새 견적을 계산합니다.',
                 );
@@ -592,8 +870,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               setQuoteNonce((value) => value + 1);
             } catch (error) {
               if (controller.signal.aborted) return;
+              activePromptVersionRef.current = null;
               setActivePromptVersion(null);
-              setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+              setDraft((current) => ({ ...current, promptVersionId: null }));
               setPromptVersionError(messageOf(error));
               setQuoteError('활성 프롬프트를 다시 확인하지 못해 견적과 생성을 잠갔습니다.');
             }
@@ -633,11 +912,10 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               if (controller.signal.aborted) return;
               const refreshed = getActivePromptVersionReference(catalog);
               if (!refreshed) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+              activePromptVersionRef.current = refreshed;
               setActivePromptVersion(refreshed);
               setPromptVersionError(null);
-              setDraft((current) =>
-                current ? { ...current, promptVersionId: refreshed.id } : current,
-              );
+              setDraft((current) => ({ ...current, promptVersionId: refreshed.id }));
               setQuoteError(
                 '활성 프롬프트 변경을 반영해 최신 버전으로 새 견적을 계산합니다.',
               );
@@ -646,8 +924,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               }
             } catch (refreshError) {
               if (controller.signal.aborted) return;
+              activePromptVersionRef.current = null;
               setActivePromptVersion(null);
-              setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+              setDraft((current) => ({ ...current, promptVersionId: null }));
               setPromptVersionError(messageOf(refreshError));
               setQuoteError('프롬프트 변경 충돌 후 활성 버전을 다시 확인하지 못했습니다.');
             }
@@ -667,18 +946,56 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
     };
   }, [activePromptVersion?.id, canRequestQuote, draft, quoteNonce, signature, step]);
 
-  if (!draft) {
+  if (
+    (!draftRestoreChecked || productsLoading || sourceCopyLoading) &&
+    !hasPendingRecovery
+  ) {
     return (
-      <section className="route-state">
-        <span className="state-symbol danger" aria-hidden="true">!</span>
-        <h1>사용 가능한 상품 에셋이 없습니다</h1>
-        <p>Production 검수를 통과한 상품을 등록한 뒤 다시 시도해 주세요.</p>
-        <Link className="button button-secondary" href="/videos">라이브러리로 이동</Link>
+      <section className="route-state" aria-busy="true">
+        <span className="mini-spinner" aria-hidden="true" />
+        <h1>{sourceCopyLoading ? '이전 영상 설정을 불러오는 중입니다' : '영상 설정을 준비하고 있습니다'}</h1>
+        <p>활성 상품 카탈로그와 이 탭의 안전한 임시 저장 기록을 확인하고 있습니다.</p>
       </section>
     );
   }
 
-  const caveat = assetCaveat(draft.product.productId, draft.product.name);
+  if (!draft.product && products.length === 0 && !hasPendingRecovery) {
+    return (
+      <section className="route-state">
+        <span className="state-symbol danger" aria-hidden="true">!</span>
+        <h1>{productsError ? '상품 카탈로그를 불러오지 못했습니다' : '활성화된 광고 상품이 없습니다'}</h1>
+        <p>
+          {productsError
+            ? `${productsError} Backend 연결을 확인한 뒤 다시 시도해 주세요.`
+            : '상품을 검수 대기로 등록하고 의미·수량·라벨을 확인한 뒤 활성화해 주세요.'}
+        </p>
+        {draftTouched && (
+          <p>상품 외 영상 전략과 크리에이티브 입력은 이 탭에 임시 저장했습니다.</p>
+        )}
+        <div className="state-actions">
+          {productsError && (
+            <button
+              className="button button-secondary"
+              type="button"
+              onClick={() => {
+                setProductsLoading(true);
+                setProductsError(null);
+                setProductsNonce((value) => value + 1);
+              }}
+            >
+              다시 불러오기
+            </button>
+          )}
+          <Link className="button button-primary" href="/products">상품 관리 열기</Link>
+        </div>
+      </section>
+    );
+  }
+
+  const caveat = draft.product
+    ? draft.product.assetReviewNote ||
+      assetCaveat(draft.product.productId, draft.product.name)
+    : null;
   const currentIndex = STEPS.findIndex((item) => item.key === step);
   const validReferenceError =
     draft.visualMode === 'model_included'
@@ -693,7 +1010,6 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   );
   const quoteCurrent =
     quoteForSignature === signature && !isQuoteExpired(quote) && quotePromptVersionCurrent;
-  const hasPendingRecovery = Boolean(pendingRecovery || corruptPendingRecovery);
   const canRecoverPending = Boolean(
     pendingRecovery?.requestBody &&
       (pendingLookupStatus === 'not-found' || pendingLookupStatus === 'recoverable'),
@@ -709,7 +1025,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   function update<Key extends keyof CreateDraft>(key: Key, value: CreateDraft[Key]) {
     if (submittingRef.current) return;
     quoteVersionRecoveryAttemptsRef.current = 0;
-    setDraft((current) => current && ({ ...current, [key]: value }));
+    setDraft((current) => ({ ...current, [key]: value }));
+    setDraftTouched(true);
+    setDraftRestoreNotice(null);
     setQuote(null);
     setQuoteForSignature(null);
     setQuoteLoading(false);
@@ -735,8 +1053,14 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }
 
   function nextStep() {
-    if (!draft || submittingRef.current) return;
-    if (step === 'product') move('template');
+    if (submittingRef.current) return;
+    if (step === 'product') {
+      if (!draft.product) {
+        setSubmitError('광고할 활성 상품을 선택해 주세요.');
+        return;
+      }
+      move('template');
+    }
     else if (step === 'template' && draft.template) move('creative');
     else if (step === 'creative') {
       if (!draft.cta.trim() || !draft.advertisingPurpose.trim()) {
@@ -759,8 +1083,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }
 
   async function submitGeneration() {
+    const selectedProduct = draft.product;
     if (
-      !draft ||
+      !selectedProduct ||
       !quote ||
       !quoteCurrent ||
       insufficientBalance ||
@@ -776,6 +1101,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       const catalog = await studioApi.getPromptVersions();
       const latestActive = getActivePromptVersionReference(catalog);
       if (!latestActive) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+      activePromptVersionRef.current = latestActive;
       setActivePromptVersion(latestActive);
       setPromptVersionError(null);
       if (
@@ -786,7 +1112,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         )
       ) {
         setDraft((current) =>
-          current ? { ...current, promptVersionId: latestActive.id } : current,
+          ({ ...current, promptVersionId: latestActive.id }),
         );
         setQuote(null);
         setQuoteForSignature(null);
@@ -798,16 +1124,58 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         return;
       }
     } catch (error) {
+      activePromptVersionRef.current = null;
       setActivePromptVersion(null);
-      setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+      setDraft((current) => ({ ...current, promptVersionId: null }));
       setPromptVersionError(messageOf(error));
       setSubmitError('활성 프롬프트를 다시 확인하지 못해 유료 생성 요청을 보내지 않았습니다.');
       submittingRef.current = false;
       setSubmitting(false);
       return;
     }
-    const generationInput = {
+
+    try {
+      const latestProducts = await productCatalogApi.listProducts();
+      const latestProduct = latestProducts.items.find(
+        (product) => product.productId === selectedProduct.productId,
+      );
+      if (
+        !latestProduct ||
+        !isProductAvailableForGeneration(latestProduct) ||
+        latestProduct.revision !== selectedProduct.revision
+      ) {
+        const availableProducts = latestProducts.items.filter(isProductAvailableForGeneration);
+        setProducts(availableProducts);
+        setDraft((current) => ({ ...current, product: null }));
+        setDraftTouched(true);
+        setDraftRestoreNotice(
+          latestProduct && isProductAvailableForGeneration(latestProduct)
+            ? '상품 revision이 변경되어 상품 선택만 해제했습니다. 최신 상품을 직접 다시 선택하면 나머지 입력은 그대로 사용할 수 있습니다.'
+            : '상품이 비활성화되거나 보관되어 상품 선택만 해제했습니다. 나머지 입력은 그대로 보존했습니다.',
+        );
+        setQuote(null);
+        setQuoteForSignature(null);
+        setSubmitError(
+          latestProduct
+            ? '상품 정보가 변경되어 유료 요청을 보내지 않았습니다. 최신 상품으로 새 견적을 확인해 주세요.'
+            : '상품이 비활성화되거나 보관되어 유료 요청을 보내지 않았습니다. 다른 활성 상품을 선택해 주세요.',
+        );
+        submittingRef.current = false;
+        setSubmitting(false);
+        setStep('product');
+        return;
+      }
+    } catch (error) {
+      setSubmitError(
+        `상품 카탈로그를 다시 확인하지 못해 유료 생성 요청을 보내지 않았습니다. ${messageOf(error)}`,
+      );
+      submittingRef.current = false;
+      setSubmitting(false);
+      return;
+    }
+    const generationInput: StartGenerationInput = {
       ...draft,
+      product: selectedProduct,
       quoteId: quote.quoteId,
       clientRequestId,
     };
@@ -815,7 +1183,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       clientRequestId,
       quoteId: quote.quoteId,
       createdAt: new Date().toISOString(),
-      request: snapshotDraft(draft),
+      request: snapshotDraft(generationInput),
       requestBody: studioApi.prepareGenerationRequest(generationInput),
     };
     if (!persistPendingSubmission(pending)) {
@@ -827,12 +1195,16 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       );
       return;
     }
+    clearTemporaryDraft();
+    setDraftTouched(false);
     try {
       const jobId = await studioApi.startPreparedGeneration(
         pending.requestBody,
         clientRequestId,
       );
       clearPendingSubmission();
+      clearTemporaryDraft();
+      setDraftTouched(false);
       setPendingRecovery(null);
       setCorruptPendingRecovery(false);
       try {
@@ -869,6 +1241,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         pendingRecovery.clientRequestId,
       );
       clearPendingSubmission();
+      clearTemporaryDraft();
+      setDraftTouched(false);
       setPendingRecovery(null);
       setCorruptPendingRecovery(false);
       try {
@@ -901,6 +1275,18 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       {copiedFromJob && (
         <div className="notice-banner success" role="status">
           이전 작업의 설정을 불러왔습니다. 생성형 영상은 같은 설정이어도 화면이 달라질 수 있으며 비용은 새로 계산됩니다.
+        </div>
+      )}
+
+      {draftRestoreNotice && (
+        <div className="notice-banner warning" role="status" aria-live="polite">
+          {draftRestoreNotice}
+        </div>
+      )}
+
+      {draftStorageError && (
+        <div className="notice-banner warning" role="alert">
+          {draftStorageError}
         </div>
       )}
 
@@ -989,7 +1375,12 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         <section className="panel create-panel" aria-busy={submitting}>
           <fieldset className="wizard-fieldset" disabled={submitting || hasPendingRecovery}>
           {step === 'product' && (
-            <ProductStep draft={draft} onProduct={(product) => update('product', product)} caveat={caveat} />
+            <ProductStep
+              draft={draft}
+              products={products}
+              onProduct={(product) => update('product', product)}
+              caveat={caveat}
+            />
           )}
           {step === 'template' && (
             <TemplateStep
@@ -1035,7 +1426,10 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               <button
                 type="button"
                 className="button button-primary"
-                disabled={step === 'template' && !draft.template}
+                disabled={
+                  (step === 'product' && !draft.product) ||
+                  (step === 'template' && !draft.template)
+                }
                 onClick={nextStep}
               >
                 다음
@@ -1067,8 +1461,15 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
 
         <aside className="create-summary" aria-label="현재 영상 설정 요약">
           <div className="summary-product">
-            <Image src={draft.product.imageUrl} alt="" width={64} height={64} unoptimized />
-            <div><small>선택 상품</small><strong>{draft.product.name}</strong></div>
+            {draft.product ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={draft.product.imageUrl} alt="" width={64} height={64} referrerPolicy="no-referrer" />
+                <div><small>선택 상품</small><strong>{draft.product.name}</strong></div>
+              </>
+            ) : (
+              <div><small>선택 상품</small><strong>다시 선택해 주세요</strong></div>
+            )}
           </div>
           <SummaryRow label="영상 전략" value={draft.template?.name ?? '선택 전'} />
           <SummaryRow label="출연 방식" value={visualModeLabel(draft.visualMode)} />
@@ -1101,11 +1502,13 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
 
 function ProductStep({
   draft,
+  products,
   onProduct,
   caveat,
 }: {
   draft: CreateDraft;
-  onProduct: (product: CreateDraft['product']) => void;
+  products: CatalogProduct[];
+  onProduct: (product: CatalogProduct) => void;
   caveat: string | null;
 }) {
   return (
@@ -1113,9 +1516,18 @@ function ProductStep({
       <div className="section-heading">
         <span>1</span><div><h2>광고할 상품을 선택하세요</h2><p>현재 생성에 허용된 에셋만 표시하며, 수량·작은 글자 검증 범위는 상품별로 안내합니다.</p></div>
       </div>
+      <div className="inline-actions">
+        <Link className="button button-secondary" href="/products">+ 광고 상품 추가·관리</Link>
+      </div>
       <div className="product-choice-list" role="radiogroup" aria-label="Production 상품">
-        {PRODUCTION_PRODUCTS.map((product) => {
-          const selected = product.productId === draft.product.productId;
+        {products.length === 0 && (
+          <div className="empty-state compact-empty">
+            <h3>선택 가능한 활성 상품이 없습니다</h3>
+            <p>상품 관리에서 자산을 검수하고 활성화한 뒤 다시 불러와 주세요.</p>
+          </div>
+        )}
+        {products.map((product) => {
+          const selected = product.productId === draft.product?.productId;
           return (
             <button
               key={product.productId}
@@ -1125,7 +1537,8 @@ function ProductStep({
               className={`product-choice ${selected ? 'selected' : ''}`}
               onClick={() => onProduct(product)}
             >
-              <Image src={product.imageUrl} alt="" width={92} height={92} unoptimized />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={product.imageUrl} alt="" width={92} height={92} loading="lazy" referrerPolicy="no-referrer" />
               <span><small>{product.curator}</small><strong>{product.name}</strong><em>{product.option}</em></span>
               <i aria-hidden="true" />
             </button>
@@ -1133,7 +1546,7 @@ function ProductStep({
         })}
       </div>
       <p className="audit-copy">
-        기술 검수 {PRODUCTION_ASSET_AUDIT.technicallyEligibleProductCount}개 중 현재 영상 생성에 허용된 {PRODUCTION_PRODUCTS.length}개 상품입니다.
+        기존 데이터 기술 검수 {PRODUCTION_ASSET_AUDIT.technicallyEligibleProductCount}개와 별개로, 현재 카탈로그에서 기술·의미 검수를 모두 확인하고 활성화한 {products.length}개 상품입니다.
       </p>
       {caveat && <div className="asset-caveat" role="note"><strong>에셋 주의</strong><p>{caveat}</p></div>}
     </div>

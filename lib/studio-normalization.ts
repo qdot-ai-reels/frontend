@@ -15,6 +15,7 @@ export interface PendingSubmission {
 
 export interface PendingGenerationSnapshot {
   productId: string;
+  productRevision: number | null;
   templateId: string;
   templateVersion: string;
   visualMode: VisualMode;
@@ -132,6 +133,12 @@ export function parsePendingSubmission(value: string | null): PendingSubmission 
 function parsePendingGenerationSnapshot(value: unknown): PendingGenerationSnapshot | null {
   const item = asRecord(value);
   const productId = asString(item.productId);
+  const productRevision =
+    typeof item.productRevision === 'number' &&
+    Number.isSafeInteger(item.productRevision) &&
+    item.productRevision > 0
+      ? item.productRevision
+      : null;
   const templateId = asString(item.templateId);
   const templateVersion = asString(item.templateVersion);
   const visualMode =
@@ -172,6 +179,7 @@ function parsePendingGenerationSnapshot(value: unknown): PendingGenerationSnapsh
   }
   return {
     productId,
+    productRevision,
     templateId,
     templateVersion,
     visualMode,
