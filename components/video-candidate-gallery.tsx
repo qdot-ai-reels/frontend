@@ -165,10 +165,11 @@ export function VideoCandidateGallery({
                     {selected ? '선택됨' : '이 후보 선택'}
                   </button>
                 )}
-                {candidate.status === 'COMPLETED' && candidate.downloadUrl && (
+                {candidate.status === 'COMPLETED' && (candidate.downloadUrl || candidate.videoUrl) && (
                   <a
                     className="text-link"
-                    href={candidate.downloadUrl}
+                    href={candidate.downloadUrl ?? candidate.videoUrl ?? undefined}
+                    download
                     aria-label={`후보 ${candidate.index} 다운로드`}
                   >
                     다운로드
