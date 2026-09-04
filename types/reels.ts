@@ -33,6 +33,7 @@ export interface GenerationOptions {
   mustInclude: string;
   mustExclude: string;
   extraDetails: string;
+  promptVersionId?: string | null;
 }
 
 export interface ScriptScene {

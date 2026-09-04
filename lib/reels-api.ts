@@ -101,21 +101,16 @@ async function readError(response: Response, fallback: string): Promise<string> 
   return fallback;
 }
 
-function buildAdditionalPrompt(options: GenerationOptions): string {
-  return [
-    `광고 목적: ${options.advertisingPurpose}`,
-    `CTA: ${options.cta}`,
-    options.visualMode === 'model_included'
-      ? '장면 구성: 모든 장면에서 제공된 동일 모델의 얼굴이 명확히 보이게 유지. 립싱크 금지. 양손은 프레임 밖에 두고 상품을 가리거나 겹치지 않게 배치'
-      : options.visualMode === 'generated_model'
-        ? '장면 구성: 실존 인물을 모사하지 않는 성인 한국인 여성 AI 가상 모델 한 명을 새로 생성. 얼굴과 상반신이 대부분의 장면에서 명확히 보이고, 상품을 자연스럽게 들어 소개. 인물·의상·손·상품 형태를 일관되게 유지. 립싱크와 화면 내 추가 문구 금지'
-        : '장면 구성: 인물이나 모델 없이 상품만 사용',
-    options.mustInclude && `반드시 포함: ${options.mustInclude}`,
-    options.mustExclude && `포함 금지: ${options.mustExclude}`,
-    options.extraDetails && `추가 요청: ${options.extraDetails}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+function buildCreativeBrief(options: GenerationOptions): Record<string, unknown> {
+  return {
+    advertising_purpose: options.advertisingPurpose,
+    cta: options.cta,
+    visual_mode: options.visualMode,
+    channel: options.channel,
+    must_include: options.mustInclude || null,
+    must_exclude: options.mustExclude || null,
+    extra_details: options.extraDetails || null,
+  };
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -508,7 +503,8 @@ export const httpReelsApi: ReelsApi = {
       body: JSON.stringify({
         product: product.rawProduct,
         image_url: product.imageUrl,
-        prompt: buildAdditionalPrompt(options),
+        creative_brief: buildCreativeBrief(options),
+        prompt_version_id: options.promptVersionId,
         max_duration_seconds: options.durationSeconds,
         channel: options.channel,
       }),
@@ -526,7 +522,6 @@ export const httpReelsApi: ReelsApi = {
   },
 
   async generateFinalVideo(product, script, options, onProgress) {
-    const prompt = buildAdditionalPrompt(options);
     const influencerImageUrls =
       options.visualMode === 'model_included'
         ? activeInfluencerReferenceUrls(options.influencerImageUrls)
@@ -538,7 +533,8 @@ export const httpReelsApi: ReelsApi = {
       // Always send the user's explicit mode. The backend uses this contract
       // to suppress server-level influencer defaults for product-only jobs.
       visual_mode: options.visualMode,
-      prompt,
+      creative_brief: buildCreativeBrief(options),
+      prompt_version_id: options.promptVersionId,
       max_duration_seconds: options.durationSeconds,
       channel: options.channel,
       target_audience: script.summary.main_target,

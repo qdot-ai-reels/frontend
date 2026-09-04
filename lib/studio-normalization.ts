@@ -1,3 +1,4 @@
+import type { VisualMode } from '../types/reels';
 import type { StudioScriptDocument, StudioScriptScene } from '../types/studio';
 
 type JsonRecord = Record<string, unknown>;
@@ -8,6 +9,24 @@ export interface PendingSubmission {
   clientRequestId: string;
   quoteId: string;
   createdAt: string;
+  request: PendingGenerationSnapshot | null;
+  requestBody: Record<string, unknown> | null;
+}
+
+export interface PendingGenerationSnapshot {
+  productId: string;
+  templateId: string;
+  templateVersion: string;
+  visualMode: VisualMode;
+  influencerImageUrls: string[];
+  outputCount: number;
+  cta: string;
+  advertisingPurpose: string;
+  channel: string;
+  mustInclude: string;
+  mustExclude: string;
+  extraDetails: string;
+  promptVersionId: string | null;
 }
 
 function asRecord(value: unknown): JsonRecord {
@@ -96,14 +115,90 @@ export function parsePendingSubmission(value: string | null): PendingSubmission 
     if (!clientRequestId || !quoteId || !createdAt || Number.isNaN(Date.parse(createdAt))) {
       return null;
     }
-    return { clientRequestId, quoteId, createdAt };
+    const request = parsePendingGenerationSnapshot(item.request);
+    const parsedBody = asRecord(item.requestBody);
+    const requestBody =
+      Object.keys(parsedBody).length > 0 &&
+      asString(parsedBody.client_request_id) === clientRequestId &&
+      asString(parsedBody.quote_id) === quoteId
+        ? parsedBody
+        : null;
+    return { clientRequestId, quoteId, createdAt, request, requestBody };
   } catch {
     return null;
   }
 }
 
-export function isExplicitSubmissionRejection(status: number | null): boolean {
-  return status != null && status >= 400 && status < 500 && status !== 408;
+function parsePendingGenerationSnapshot(value: unknown): PendingGenerationSnapshot | null {
+  const item = asRecord(value);
+  const productId = asString(item.productId);
+  const templateId = asString(item.templateId);
+  const templateVersion = asString(item.templateVersion);
+  const visualMode =
+    item.visualMode === 'product_only' ||
+    item.visualMode === 'model_included' ||
+    item.visualMode === 'generated_model'
+      ? item.visualMode
+      : null;
+  const outputCount = asNumber(item.outputCount);
+  const cta = typeof item.cta === 'string' ? item.cta : null;
+  const advertisingPurpose =
+    typeof item.advertisingPurpose === 'string' ? item.advertisingPurpose : null;
+  const channel = typeof item.channel === 'string' ? item.channel : null;
+  const mustInclude = typeof item.mustInclude === 'string' ? item.mustInclude : null;
+  const mustExclude = typeof item.mustExclude === 'string' ? item.mustExclude : null;
+  const extraDetails = typeof item.extraDetails === 'string' ? item.extraDetails : null;
+  const promptVersionId = asString(item.promptVersionId);
+  const influencerImageUrls = Array.isArray(item.influencerImageUrls)
+    ? item.influencerImageUrls.filter((entry): entry is string => typeof entry === 'string').slice(0, 2)
+    : [];
+  if (
+    !productId ||
+    !templateId ||
+    !templateVersion ||
+    !visualMode ||
+    outputCount == null ||
+    !Number.isInteger(outputCount) ||
+    outputCount < 1 ||
+    outputCount > 4 ||
+    cta == null ||
+    advertisingPurpose == null ||
+    channel == null ||
+    mustInclude == null ||
+    mustExclude == null ||
+    extraDetails == null
+  ) {
+    return null;
+  }
+  return {
+    productId,
+    templateId,
+    templateVersion,
+    visualMode,
+    influencerImageUrls,
+    outputCount,
+    cta,
+    advertisingPurpose,
+    channel,
+    mustInclude,
+    mustExclude,
+    extraDetails,
+    promptVersionId,
+  };
+}
+
+export type RejectedSubmissionDisposition = 'requote' | 'rejected';
+
+export function rejectedSubmissionDisposition(code: string | null): RejectedSubmissionDisposition {
+  if (code === 'REQUOTE_REQUIRED' || code === 'QUOTE_NOT_FOUND') return 'requote';
+  return 'rejected';
+}
+
+export function isIdentityReferenceProductionEnabled(
+  modelId: string | null,
+  explicitFlag: string | undefined,
+): boolean {
+  return Boolean(modelId) && explicitFlag === 'true';
 }
 
 export function parseApiDate(value: string | null): Date | null {

@@ -39,12 +39,62 @@ export interface GenerationQuote {
   configHash: string | null;
   currency: 'USD';
   expectedTotalUsd: number;
-  maxTotalUsd: number;
+  maxTotalUsd: number | null;
   availableBalanceUsd: number | null;
   expiresAt: string | null;
   coverage: string | null;
   disclaimer: string | null;
   lineItems: QuoteLineItem[];
+  promptVersion: PromptVersionReference | null;
+}
+
+export const PROMPT_TEMPLATE_KEYS = [
+  'script_generation',
+  'script_tts_repair',
+  'video_base',
+  'video_identity_reference',
+  'video_generated_model',
+  'creative_brief',
+] as const;
+
+export type PromptTemplateKey = (typeof PROMPT_TEMPLATE_KEYS)[number];
+
+export type PromptTemplates = Record<PromptTemplateKey, string>;
+
+export interface PromptVersionReference {
+  id: string;
+  version: string;
+  name: string;
+  contentSha256: string | null;
+}
+
+export interface PromptVersion extends PromptVersionReference {
+  description: string;
+  createdAt: string | null;
+  activatedAt: string | null;
+  isActive: boolean;
+  templates: PromptTemplates;
+}
+
+export interface PromptVersionCatalog {
+  activeBundleId: string | null;
+  versions: PromptVersion[];
+}
+
+export interface GenerationRequestLookup {
+  clientRequestId: string;
+  requestState: 'IN_PROGRESS' | 'ACCEPTED' | 'REJECTED';
+  jobId: string | null;
+  status: GenerationJobStatus | 'REJECTED';
+  stage: GenerationStage | 'REQUEST_VALIDATION' | 'REQUEST_REJECTED' | null;
+  statusUrl: string | null;
+  recoverable: boolean;
+  retryAfterSeconds: number | null;
+  error: {
+    code: string;
+    message: string;
+    httpStatus: number;
+  } | null;
 }
 
 export interface StudioProductSnapshot {
@@ -125,6 +175,7 @@ export interface StudioJob {
   script: StudioScriptDocument | null;
   timingValidation: TimingSceneValidation[];
   assetWarning: string | null;
+  promptVersion: PromptVersionReference | null;
   candidates: VideoCandidate[];
 }
 
@@ -161,6 +212,7 @@ export interface CreateDraft {
   mustInclude: string;
   mustExclude: string;
   extraDetails: string;
+  promptVersionId: string | null;
 }
 
 export interface StartGenerationInput extends CreateDraft {

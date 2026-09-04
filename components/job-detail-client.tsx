@@ -46,10 +46,10 @@ function visualModeLabel(value: StudioJob['options']['visualMode']): string {
 }
 
 function stagePosition(stage: GenerationStage | null, status: GenerationJobStatus): number {
-  if (status === 'FAILED') return Math.max(0, STAGES.findIndex((item) => item.key === stage));
-  if (status === 'COMPLETED' || status === 'PARTIAL_COMPLETED') return STAGES.length - 1;
   if (stage === 'SCRIPT_REGENERATION') return 1;
   if (stage === 'TTS_VALIDATION' || stage === 'TTS_FALLBACK') return 2;
+  if (status === 'FAILED') return STAGES.findIndex((item) => item.key === stage);
+  if (status === 'COMPLETED' || status === 'PARTIAL_COMPLETED') return STAGES.length - 1;
   const index = STAGES.findIndex((item) => item.key === stage);
   return index < 0 ? 0 : index;
 }
@@ -82,6 +82,11 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const jobRef = useRef<StudioJob | null>(null);
+  const consecutiveNotFound = useRef(0);
+
+  useEffect(() => {
+    consecutiveNotFound.current = 0;
+  }, [jobId]);
 
   const refresh = useCallback(() => {
     setNotFound(false);
@@ -117,6 +122,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
         const next = await studioApi.getGeneration(jobId, controller.signal);
         if (disposed) return;
         failures = 0;
+        consecutiveNotFound.current = 0;
         setJob((current) => {
           const merged = mergeDetail(current, next);
           jobRef.current = merged;
@@ -137,6 +143,14 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
         if (disposed || controller.signal.aborted) return;
         setLoading(false);
         if (errorStatus(requestError) === 404) {
+          consecutiveNotFound.current += 1;
+          if (consecutiveNotFound.current < 3) {
+            setError(`서버에서 작업을 찾지 못해 다시 확인하고 있습니다 (${consecutiveNotFound.current}/3).`);
+            setStale(Boolean(jobRef.current));
+            setNotFound(false);
+            schedule(2_500);
+            return;
+          }
           jobRef.current = null;
           setJob(null);
           setSelectedCandidateId(null);
@@ -145,6 +159,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
           setNotFound(true);
           return;
         }
+        consecutiveNotFound.current = 0;
         failures += 1;
         setError(errorMessage(requestError));
         setStale(Boolean(jobRef.current));
@@ -184,6 +199,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
   const warning = job
     ? job.assetWarning ?? assetCaveat(job.product.productId, job.product.name)
     : null;
+  const live = active && !offline && !stale && !error;
 
   if (loading && !job) return <DetailSkeleton />;
 
@@ -256,7 +272,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
       <div className="live-region" aria-live="polite">
         {offline ? '오프라인입니다. 연결되면 자동으로 최신 상태를 확인합니다.' :
           stale ? '마지막으로 확인한 상태를 표시하고 있습니다.' :
-            active ? `${job.message ?? '작업을 처리하고 있습니다.'} 화면을 닫아도 생성은 계속됩니다.` :
+            live ? `${job.message ?? '작업을 처리하고 있습니다.'} 화면을 닫아도 생성은 계속됩니다.` :
               `마지막 업데이트 ${formatDateTime(job.updatedAt)}`}
       </div>
 
@@ -270,7 +286,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
           <section className="panel progress-panel" aria-labelledby="progress-title">
             <div className="panel-heading">
               <div><h2 id="progress-title">생성 진행</h2><p>단계와 후보별 완료 수를 서버 상태 기준으로 표시합니다.</p></div>
-              <span className={active ? 'live-badge' : 'quiet-badge'}>{active && <i aria-hidden="true" />}{STATUS_LABELS[job.status]}</span>
+              <span className={live ? 'live-badge' : 'quiet-badge'}>{live && <i aria-hidden="true" />}{stale && active ? '마지막 확인 · ' : ''}{STATUS_LABELS[job.status]}</span>
             </div>
             <StageProgress job={job} />
             <div className="candidate-progress-copy">
@@ -294,7 +310,7 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
                 onSelect={setSelectedCandidateId}
               />
             ) : (
-              <CandidateWaiting count={job.candidateCount} active={active} />
+              <CandidateWaiting count={job.candidateCount} active={live} />
             )}
             {job.candidates.some((candidate) => candidate.status === 'FAILED') && (
               <div className="notice-banner warning" role="note">
@@ -327,6 +343,17 @@ export function JobDetailClient({ jobId }: { jobId: string }) {
               <div><dt>채널</dt><dd>{job.options.channel ?? '기록 없음'}</dd></div>
               <div><dt>CTA</dt><dd>{job.options.cta ?? '기록 없음'}</dd></div>
               <div><dt>광고 목적</dt><dd>{job.options.advertisingPurpose ?? '기록 없음'}</dd></div>
+              <div>
+                <dt>프롬프트 버전</dt>
+                <dd>
+                  {job.promptVersion
+                    ? `${job.promptVersion.name} · v${job.promptVersion.version}`
+                    : '이전 작업 · 기록 없음'}
+                </dd>
+              </div>
+              {job.promptVersion?.contentSha256 && (
+                <div><dt>프롬프트 해시</dt><dd><code>{job.promptVersion.contentSha256.slice(0, 12)}…</code></dd></div>
+              )}
               <div><dt>생성 시각</dt><dd>{formatDateTime(job.createdAt)}</dd></div>
             </dl>
           </section>
@@ -342,6 +369,14 @@ function StageProgress({ job }: { job: StudioJob }) {
   )?.stage;
   const effectiveStage = job.status === 'FAILED' ? failedCandidateStage ?? job.stage : job.stage;
   const current = stagePosition(effectiveStage, job.status);
+  const failedWithoutRecordedStage = job.status === 'FAILED' && current < 0;
+  if (failedWithoutRecordedStage) {
+    return (
+      <div className="notice-banner warning" role="note">
+        실패 단계 미기록 · 서버에 어느 생성 단계에서 실패했는지 남아 있지 않습니다.
+      </div>
+    );
+  }
   return (
     <ol className="stage-progress" aria-label="영상 생성 단계">
       {STAGES.map((stage, index) => {

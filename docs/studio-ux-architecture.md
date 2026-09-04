@@ -17,8 +17,9 @@
 StudioShell
 ├── /videos                 영상 작업 목록과 운영 요약
 ├── /videos/[jobId]         비동기 작업 복구·후보 리뷰
-└── /create                 단계형 생성과 서버 견적
+├── /create                 단계형 생성과 서버 견적
     └── ?from_job=[jobId]   기존 설정을 복사해 새 후보 생성
+└── /settings/prompts       프롬프트 편집·버전 저장·활성화
 ```
 
 `/`은 호환 진입점이다. 이전 URL에 `job`이 있으면 `/videos/[jobId]`로, 없으면 `/videos`로 이동한다. 상세 화면은 현재 frontend allowlist가 아니라 backend의 안전한 product snapshot을 사용하므로 과거 작업을 잃지 않는다.
@@ -38,12 +39,25 @@ StudioShell
 
 1. **상품**: production allowlist만 노출하고 대표 단품 에셋 경계를 함께 표시한다.
 2. **영상 전략**: backend가 반환한 versioned 4/6/8/15초 radio card와 구간 비율을 표시한다. canonical 로컬 fallback은 API 장애 시 구조를 설명하는 offline display 전용이며, fresh server quote 없이는 생성 CTA를 활성화하지 않는다.
-3. **크리에이티브**: AI 가상 모델, 상품만, 지정 모델을 명시적으로 선택하고 CTA·광고 목적·채널·후보 수를 입력한다.
+3. **크리에이티브**: AI 가상 모델과 상품만 모드를 선택하고 CTA·광고 목적·채널·후보 수를 입력한다. 지정 모델은 동의된 에셋과 provider canary를 통과한 배포에서만 명시적 feature flag로 활성화하며 현재 Seedance 경로에서는 비활성이다.
 4. **비용 확인**: 서버 quote의 provider expected/range USD, line item, coverage, disclaimer, 만료 시각을 표시한다. TTS·렌더·저장·재시도 비용 제외를 고정 안내한다.
+
+위저드는 활성 `prompt_version_id`를 먼저 확인하고, 프롬프트 문자열 대신 구조화된 `creative_brief`를 backend에 보낸다. 활성 버전을 읽지 못하면 견적과 유료 생성을 fail-closed로 잠근다. 견적과 작업 상세에는 backend가 반환한 실제 prompt version metadata를 표시한다.
+
+### 프롬프트 설정
+
+- 여섯 종류의 실제 생성 프롬프트를 하나의 bundle로 실시간 편집한다.
+- backend와 동일한 template별 필수·허용 `{{token}}`, 미완성 토큰, 빈 내용을 입력 중 검증한다.
+- UTF-8 기준 template 64KiB, 전체 bundle 256KiB 상한을 backend와 동일하게 검증한다.
+- 기존 Published 버전을 직접 수정하지 않고 이름·변경 메모와 함께 새 불변 버전으로 저장한다.
+- 저장과 활성화를 분리하고, 활성화는 두 단계 확인을 거친다.
+- 활성 버전과의 차이 및 개별 템플릿 변경 상태를 표시한다.
+- provider 실행·테스트 버튼은 제공하지 않는다.
+- 활성화는 신규 견적·작업부터 적용하고 queued/running job은 접수 시점 snapshot을 유지한다.
 
 설정이 바뀌면 quote ID와 생성 가능 상태를 즉시 폐기한다. 350ms debounce 뒤 서버 견적을 다시 요청하며, 만료되면 자동 갱신한다. fresh quote와 필수 입력이 모두 있고 잔액 정보가 충분할 때만 최종 CTA를 활성화한다.
 
-최종 CTA는 `client_request_id`를 생성 요청 동안 유지하고 같은 값을 `Idempotency-Key`에도 보낸다. 전송 직전에 sessionStorage에 pending ID를 기록하고, 불확실한 응답이나 reload 뒤에는 자동 재전송을 막아 라이브러리 확인을 먼저 요구한다. 같은 탭에 원래 quote가 남아 있을 때만 사용자가 명시적으로 동일 ID 재전송을 준비할 수 있다. 202 응답의 job ID를 받으면 pending 기록을 지우고 즉시 상세로 이동한다.
+최종 CTA는 `client_request_id`를 생성 요청 동안 유지하고 같은 값을 `Idempotency-Key`에도 보낸다. 전송 직전에 원본 요청 스냅샷을 같은 탭의 sessionStorage에 임시 기록한다. 불확실한 응답이나 reload 뒤에는 request-ID 조회로 기존 job을 먼저 복구하며, 조회 404 한 번이나 수동 라이브러리 확인만으로 새 ID를 발급하지 않는다. 사용자가 명시적으로 복구할 때만 저장된 동일 본문·동일 ID를 재전송한다. backend는 idempotency를 quote 만료 검사보다 먼저 적용하므로 이미 접수된 job은 그대로 반환하고, 접수되지 않은 만료/누락 quote만 structured code로 fresh quote에 돌려보낸다. job ID를 받으면 임시 기록을 즉시 지운다.
 
 ### 작업 상세와 후보 리뷰
 
@@ -65,10 +79,11 @@ StudioShell
 | `studio-api` | snake/camel/legacy 응답 방어적 정규화, URL 및 비용 포맷 | backend JSON |
 | `VideoLibrary` | 필터, cursor merge, 활성 작업 refresh | list endpoint + URL query |
 | `CreateWizard` | draft, quote freshness, request id, submit state | user input + template/quote endpoints |
+| `PromptSettings` | prompt editor, token validation, immutable version save, explicit activation | prompt version endpoints |
 | `JobDetailClient` | polling lifecycle, stale recovery, candidate selection | job detail endpoint |
 | `VideoCandidateGallery` | candidate playback, QC metadata, download controls | normalized candidates |
 
-목록과 상세는 backend 영속 상태가 source of truth다. sessionStorage pending 기록은 조회 API가 없는 동안 중복 유료 재전송을 막는 안전 잠금으로만 사용한다.
+목록과 상세는 backend 영속 상태가 source of truth다. sessionStorage pending 기록은 응답 유실 시 동일 요청을 재구성하는 탭 한정 임시 안전 잠금이다. 자동 유료 재전송은 하지 않으며 job ID 확보 직후 삭제한다.
 
 ## 반응형·접근성 기준
 
@@ -91,7 +106,7 @@ StudioShell
 | 4/6/8/15초 선택 | server versioned template radio/timeline | 네 길이와 version 표시 |
 | 15초 구간 | 0–3 Hook, 3–8 소개, 8–12 분위기, 12–15 CTA | 15초 card/review/detail 확인 |
 | one-click 생성 | template/quote/request ID 기반 POST | script 사전 생성 없이 202 상세 이동 |
-| 중복 제출 방지 | full-form lock + pending session record + stable request/idempotency key | 불확실 응답/reload 뒤 자동 재전송 차단 |
+| 중복 제출 방지 | full-form lock + pending request snapshot + request-ID lookup + exact idempotent replay | 불확실 응답/reload 뒤 새 ID 차단, 기존 job 자동 복구 |
 | 비동기 완료 | job detail polling, terminal stop | 창 재접속 후 job ID 복구 |
 | 오프라인/숨김 탭 | polling pause, reconnect resume | DevTools offline/visibility 전환 |
 | 후보 리뷰 | playback/QC/select/download + 유료 retry 차단 | 완료·실패 후보 action 확인 |
@@ -100,6 +115,9 @@ StudioShell
 | 오류·빈·로딩 | route + in-view 상태 구분 | API 404/500/empty 시나리오 |
 | 360/390/768/1440 | CSS breakpoints/safe area | 네 viewport에서 overflow/CTA 확인 |
 | 접근성/모션 | labels, live/progress, reduced motion | keyboard 및 OS reduced-motion 확인 |
+| 프롬프트 버전 | `/settings/prompts`, 불변 save와 별도 activation | 저장 후 활성 유지, 명시적 활성화 후 badge 확인 |
+| 프롬프트 안전성 | token allowlist, 필수 token, 일반 텍스트 편집 | unknown/missing/malformed token 저장 차단 |
+| Job 재현성 | quote/generate `prompt_version_id`, detail metadata | 활성화 변경 전후 기존 job snapshot 불변 확인 |
 
 ## 배포 전 필수 검증
 

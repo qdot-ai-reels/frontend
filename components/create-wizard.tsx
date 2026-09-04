@@ -24,14 +24,25 @@ import {
 } from '@/lib/studio-api';
 import {
   PENDING_SUBMISSION_KEY,
-  isExplicitSubmissionRejection,
   parsePendingSubmission,
+  rejectedSubmissionDisposition,
+} from '@/lib/studio-normalization';
+import {
+  canAttemptPromptVersionRecovery,
+  getActivePromptVersionReference,
+  isQuotePromptVersionCurrent,
+  shouldRefreshPromptVersionAfterQuoteError,
+} from '@/lib/prompt-versions';
+import type {
+  PendingGenerationSnapshot,
+  PendingSubmission,
 } from '@/lib/studio-normalization';
 import type { VisualMode } from '@/types/reels';
 import type {
   CreateDraft,
   GenerationQuote,
   GenerationTemplate,
+  PromptVersionReference,
 } from '@/types/studio';
 
 type WizardStep = 'product' | 'template' | 'creative' | 'review';
@@ -58,6 +69,7 @@ function initialDraft(): CreateDraft | null {
     mustInclude: '',
     mustExclude: '',
     extraDetails: '',
+    promptVersionId: null,
   };
 }
 
@@ -77,6 +89,7 @@ function quoteSignature(draft: CreateDraft): string {
     mustInclude: draft.mustInclude.trim(),
     mustExclude: draft.mustExclude.trim(),
     extraDetails: draft.extraDetails.trim(),
+    promptVersionId: draft.promptVersionId,
     references:
       draft.visualMode === 'model_included'
         ? activeInfluencerReferenceUrls(draft.influencerImageUrls)
@@ -97,11 +110,7 @@ function clearPendingSubmission(): void {
   }
 }
 
-function persistPendingSubmission(value: {
-  clientRequestId: string;
-  quoteId: string;
-  createdAt: string;
-}): boolean {
+function persistPendingSubmission(value: PendingSubmission): boolean {
   try {
     window.sessionStorage.setItem(PENDING_SUBMISSION_KEY, JSON.stringify(value));
     return true;
@@ -109,6 +118,67 @@ function persistPendingSubmission(value: {
     return false;
   }
 }
+
+function snapshotDraft(draft: CreateDraft): PendingGenerationSnapshot {
+  if (!draft.template) throw new Error('생성할 템플릿이 없습니다.');
+  return {
+    productId: draft.product.productId,
+    templateId: draft.template.id,
+    templateVersion: draft.template.version,
+    visualMode: draft.visualMode,
+    influencerImageUrls:
+      draft.visualMode === 'model_included'
+        ? activeInfluencerReferenceUrls(draft.influencerImageUrls)
+        : [],
+    outputCount: draft.outputCount,
+    cta: draft.cta,
+    advertisingPurpose: draft.advertisingPurpose,
+    channel: draft.channel,
+    mustInclude: draft.mustInclude,
+    mustExclude: draft.mustExclude,
+    extraDetails: draft.extraDetails,
+    promptVersionId: draft.promptVersionId,
+  };
+}
+
+function restorePendingDraft(
+  pending: PendingSubmission,
+  templates: GenerationTemplate[],
+): CreateDraft | null {
+  if (!pending.request) return null;
+  const product = PRODUCTION_PRODUCTS.find(
+    (candidate) => candidate.productId === pending.request?.productId,
+  );
+  const template = templates.find(
+    (candidate) =>
+      candidate.id === pending.request?.templateId &&
+      candidate.version === pending.request?.templateVersion,
+  );
+  if (!product || !template) return null;
+  return {
+    product,
+    template,
+    visualMode: pending.request.visualMode,
+    influencerImageUrls: [...pending.request.influencerImageUrls],
+    outputCount: pending.request.outputCount,
+    cta: pending.request.cta,
+    advertisingPurpose: pending.request.advertisingPurpose,
+    channel: pending.request.channel,
+    mustInclude: pending.request.mustInclude,
+    mustExclude: pending.request.mustExclude,
+    extraDetails: pending.request.extraDetails,
+    promptVersionId: pending.request.promptVersionId,
+  };
+}
+
+type PendingLookupStatus =
+  | 'idle'
+  | 'checking'
+  | 'in-progress'
+  | 'recoverable'
+  | 'paused'
+  | 'not-found'
+  | 'error';
 
 export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const router = useRouter();
@@ -122,6 +192,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteNonce, setQuoteNonce] = useState(0);
+  const [activePromptVersion, setActivePromptVersion] = useState<PromptVersionReference | null>(null);
+  const [promptVersionLoading, setPromptVersionLoading] = useState(true);
+  const [promptVersionError, setPromptVersionError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [copiedFromJob, setCopiedFromJob] = useState(false);
@@ -130,7 +203,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
     typeof parsePendingSubmission
   > | null>(null);
   const [corruptPendingRecovery, setCorruptPendingRecovery] = useState(false);
-  const [pendingReplayArmed, setPendingReplayArmed] = useState(false);
+  const [pendingLookupStatus, setPendingLookupStatus] = useState<PendingLookupStatus>('idle');
+  const [pendingLookupMessage, setPendingLookupMessage] = useState<string | null>(null);
+  const [pendingLookupNonce, setPendingLookupNonce] = useState(0);
   const [providerCapability, setProviderCapability] = useState({
     loading: true,
     modelId: null as string | null,
@@ -138,7 +213,10 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
     supportsIdentityReference: false,
   });
   const copiedRef = useRef<string | null>(null);
+  const restoredPendingRef = useRef<string | null>(null);
+  const pendingLookupFailuresRef = useRef(0);
   const submittingRef = useRef(false);
+  const quoteVersionRecoveryAttemptsRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -159,6 +237,139 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   }, []);
 
   useEffect(() => {
+    if (!pendingRecovery) return;
+    const controller = new AbortController();
+    let pollTimer: number | null = null;
+    const lookup = () => {
+      if (document.visibilityState === 'hidden' || !navigator.onLine) {
+        setPendingLookupStatus('paused');
+        setPendingLookupMessage(
+          navigator.onLine
+            ? '숨겨진 탭에서는 요청 상태 조회를 멈춥니다. 탭으로 돌아오면 즉시 재개합니다.'
+            : '오프라인이라 요청 상태 조회를 멈췄습니다. 연결되면 즉시 재개합니다.',
+        );
+        pollTimer = window.setTimeout(
+          () => setPendingLookupNonce((value) => value + 1),
+          5_000,
+        );
+        return;
+      }
+      setPendingLookupStatus('checking');
+      setPendingLookupMessage((current) => current ?? '서버 접수 상태를 확인하고 있습니다.');
+      studioApi
+        .getGenerationRequest(pendingRecovery.clientRequestId, controller.signal)
+        .then((request) => {
+          pendingLookupFailuresRef.current = 0;
+          if (request.requestState === 'ACCEPTED' && request.jobId) {
+            clearPendingSubmission();
+            setPendingRecovery(null);
+            setCorruptPendingRecovery(false);
+            try {
+              window.sessionStorage.setItem('quedot.last-generation-job', request.jobId);
+            } catch {
+              // The durable job ID is also represented by the destination URL.
+            }
+            router.replace(`/videos/${encodeURIComponent(request.jobId)}`);
+            return;
+          }
+          if (request.requestState === 'IN_PROGRESS') {
+            if (request.recoverable) {
+              setPendingLookupStatus('recoverable');
+              setPendingLookupMessage(
+                '이전 처리 lease가 만료됐습니다. 저장된 동일 본문·동일 요청 ID로만 안전하게 이어갈 수 있습니다.',
+              );
+              return;
+            }
+            setPendingLookupStatus('in-progress');
+            setPendingLookupMessage(
+              '서버가 원래 요청을 검증하고 있습니다. 새 요청은 차단한 채 같은 요청 ID를 자동 재조회합니다.',
+            );
+            const retrySeconds = Math.min(
+              Math.max(request.retryAfterSeconds ?? 2, 2),
+              15,
+            );
+            pollTimer = window.setTimeout(
+              () => setPendingLookupNonce((value) => value + 1),
+              retrySeconds * 1_000,
+            );
+            return;
+          }
+
+          const restored = restorePendingDraft(pendingRecovery, templates);
+          const restoredForNewRequest = restored
+            ? { ...restored, promptVersionId: activePromptVersion?.id ?? null }
+            : null;
+          const rejection = request.error;
+          const disposition = rejectedSubmissionDisposition(rejection?.code ?? null);
+          clearPendingSubmission();
+          setPendingRecovery(null);
+          setCorruptPendingRecovery(false);
+          setPendingLookupStatus('idle');
+          setPendingLookupMessage(null);
+          setClientRequestId(createRequestId());
+          setQuote(null);
+          setQuoteForSignature(null);
+          if (restoredForNewRequest) setDraft(restoredForNewRequest);
+          if (disposition === 'requote' && restoredForNewRequest) {
+            setStep('review');
+            setQuoteNonce((value) => value + 1);
+            setSubmitError(
+              `${rejection?.message ?? '기존 견적을 사용할 수 없습니다.'}${rejection?.code ? ` [${rejection.code}]` : ''} 서버가 원 요청을 거절 완료해 최신 견적으로 돌아갑니다.`,
+            );
+          } else {
+            if (restoredForNewRequest) setStep('creative');
+            setSubmitError(
+              `${rejection?.message ?? '서버가 원 요청을 거절했습니다.'}${rejection?.code ? ` [${rejection.code}]` : ''} 입력을 확인한 뒤 다시 시도해 주세요.`,
+            );
+          }
+        })
+        .catch((error) => {
+          if (controller.signal.aborted) return;
+          if (
+            error instanceof StudioApiError &&
+            error.status === 404 &&
+            error.code === 'GENERATION_REQUEST_NOT_FOUND'
+          ) {
+            setPendingLookupStatus('not-found');
+            setPendingLookupMessage(
+              '서버에 아직 작업 기록이 없습니다. 새 요청 ID를 만들지 말고 저장된 동일 요청 ID로만 안전 복구하세요.',
+            );
+            return;
+          }
+          pendingLookupFailuresRef.current += 1;
+          setPendingLookupStatus('error');
+          setPendingLookupMessage(
+            `${messageOf(error)} 기존 요청 잠금은 유지되며 새 유료 요청은 차단됩니다.`,
+          );
+          const retryDelay = Math.min(
+            30_000,
+            4_000 * 2 ** Math.min(pendingLookupFailuresRef.current - 1, 3),
+          );
+          pollTimer = window.setTimeout(
+            () => setPendingLookupNonce((value) => value + 1),
+            retryDelay,
+          );
+        });
+    };
+    const timer = window.setTimeout(lookup, 0);
+    const resume = () => {
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        if (pollTimer != null) window.clearTimeout(pollTimer);
+        setPendingLookupNonce((value) => value + 1);
+      }
+    };
+    document.addEventListener('visibilitychange', resume);
+    window.addEventListener('online', resume);
+    return () => {
+      window.clearTimeout(timer);
+      if (pollTimer != null) window.clearTimeout(pollTimer);
+      controller.abort();
+      document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('online', resume);
+    };
+  }, [activePromptVersion?.id, pendingLookupNonce, pendingRecovery, router, templates]);
+
+  useEffect(() => {
     const controller = new AbortController();
     studioApi
       .getVideoProviderCapability(controller.signal)
@@ -175,6 +386,51 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    studioApi
+      .getPromptVersions(controller.signal)
+      .then((catalog) => {
+        const reference = getActivePromptVersionReference(catalog);
+        if (!reference) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+        setActivePromptVersion(reference);
+        setPromptVersionError(null);
+        setDraft((current) =>
+          current && !current.promptVersionId
+            ? { ...current, promptVersionId: reference.id }
+            : current,
+        );
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        setActivePromptVersion(null);
+        setDraft((current) => current && ({ ...current, promptVersionId: null }));
+        setPromptVersionError(messageOf(error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setPromptVersionLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (
+      !pendingRecovery ||
+      templatesLoading ||
+      restoredPendingRef.current === pendingRecovery.clientRequestId
+    ) return;
+    restoredPendingRef.current = pendingRecovery.clientRequestId;
+    const timer = window.setTimeout(() => {
+      const restored = restorePendingDraft(pendingRecovery, templates);
+      if (!restored) return;
+      setDraft(restored);
+      setStep('review');
+      setQuote(null);
+      setQuoteForSignature(null);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [pendingRecovery, templates, templatesLoading]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -198,6 +454,8 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
   useEffect(() => {
     if (
       !sourceJobId ||
+      pendingRecovery ||
+      corruptPendingRecovery ||
       copiedRef.current === sourceJobId ||
       templatesLoading ||
       providerCapability.loading
@@ -262,13 +520,16 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         }
       });
     return () => controller.abort();
-  }, [providerCapability, sourceJobId, templates, templatesLoading]);
+  }, [corruptPendingRecovery, pendingRecovery, providerCapability, sourceJobId, templates, templatesLoading]);
 
   const signature = useMemo(() => (draft ? quoteSignature(draft) : ''), [draft]);
   const canRequestQuote = Boolean(
-    !pendingRecovery &&
+      !pendingRecovery &&
       !corruptPendingRecovery &&
-    draft?.template?.supported &&
+      !promptVersionLoading &&
+      draft?.promptVersionId &&
+      draft.promptVersionId === activePromptVersion?.id &&
+      draft?.template?.supported &&
       draft.cta.trim() &&
       draft.advertisingPurpose.trim() &&
       (draft.visualMode !== 'model_included' ||
@@ -286,7 +547,59 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       setQuoteError(null);
       studioApi
         .createQuote(draft, controller.signal)
-        .then((nextQuote) => {
+        .then(async (nextQuote) => {
+          if (!nextQuote.promptVersion) {
+            setQuote(null);
+            setQuoteForSignature(null);
+            setQuoteError(
+              '견적에 프롬프트 버전 스냅샷이 없어 생성을 잠갔습니다. 서버 계약을 확인한 뒤 다시 계산해 주세요.',
+            );
+            return;
+          }
+          if (
+            !isQuotePromptVersionCurrent(
+              draft.promptVersionId,
+              activePromptVersion?.id ?? null,
+              nextQuote.promptVersion.id,
+            )
+          ) {
+            setQuote(null);
+            setQuoteForSignature(null);
+            if (!canAttemptPromptVersionRecovery(quoteVersionRecoveryAttemptsRef.current)) {
+              setQuoteError(
+                '프롬프트 버전 경합이 반복되어 자동 견적 갱신을 멈췄습니다. 잠시 후 다시 계산해 주세요.',
+              );
+              return;
+            }
+            quoteVersionRecoveryAttemptsRef.current += 1;
+            try {
+              const catalog = await studioApi.getPromptVersions(controller.signal);
+              if (controller.signal.aborted) return;
+              const refreshed = getActivePromptVersionReference(catalog);
+              if (!refreshed) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+              setActivePromptVersion(refreshed);
+              setPromptVersionError(null);
+              if (refreshed.id !== draft.promptVersionId) {
+                setDraft((current) =>
+                  current ? { ...current, promptVersionId: refreshed.id } : current,
+                );
+                setQuoteError(
+                  '견적 계산 중 활성 프롬프트가 변경되어 최신 버전으로 새 견적을 계산합니다.',
+                );
+                return;
+              }
+              setQuoteError('견적 버전이 일치하지 않아 새 견적을 한 번 더 확인합니다.');
+              setQuoteNonce((value) => value + 1);
+            } catch (error) {
+              if (controller.signal.aborted) return;
+              setActivePromptVersion(null);
+              setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+              setPromptVersionError(messageOf(error));
+              setQuoteError('활성 프롬프트를 다시 확인하지 못해 견적과 생성을 잠갔습니다.');
+            }
+            return;
+          }
+          quoteVersionRecoveryAttemptsRef.current = 0;
           setQuote(nextQuote);
           setQuoteForSignature(signature);
           setClientRequestId(createRequestId());
@@ -300,8 +613,47 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
             }
           }
         })
-        .catch((error) => {
-          if (!controller.signal.aborted) setQuoteError(messageOf(error));
+        .catch(async (error) => {
+          if (controller.signal.aborted) return;
+          if (
+            error instanceof StudioApiError &&
+            shouldRefreshPromptVersionAfterQuoteError(error.status, error.code)
+          ) {
+            setQuote(null);
+            setQuoteForSignature(null);
+            if (!canAttemptPromptVersionRecovery(quoteVersionRecoveryAttemptsRef.current)) {
+              setQuoteError(
+                '활성 프롬프트 변경 충돌이 반복되어 자동 견적 갱신을 멈췄습니다. 잠시 후 다시 계산해 주세요.',
+              );
+              return;
+            }
+            quoteVersionRecoveryAttemptsRef.current += 1;
+            try {
+              const catalog = await studioApi.getPromptVersions(controller.signal);
+              if (controller.signal.aborted) return;
+              const refreshed = getActivePromptVersionReference(catalog);
+              if (!refreshed) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+              setActivePromptVersion(refreshed);
+              setPromptVersionError(null);
+              setDraft((current) =>
+                current ? { ...current, promptVersionId: refreshed.id } : current,
+              );
+              setQuoteError(
+                '활성 프롬프트 변경을 반영해 최신 버전으로 새 견적을 계산합니다.',
+              );
+              if (refreshed.id === draft.promptVersionId) {
+                setQuoteNonce((value) => value + 1);
+              }
+            } catch (refreshError) {
+              if (controller.signal.aborted) return;
+              setActivePromptVersion(null);
+              setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+              setPromptVersionError(messageOf(refreshError));
+              setQuoteError('프롬프트 변경 충돌 후 활성 버전을 다시 확인하지 못했습니다.');
+            }
+            return;
+          }
+          setQuoteError(messageOf(error));
         })
         .finally(() => {
           if (!controller.signal.aborted) setQuoteLoading(false);
@@ -313,7 +665,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       if (expiryTimer != null) window.clearTimeout(expiryTimer);
       controller.abort();
     };
-  }, [canRequestQuote, draft, quoteNonce, signature, step]);
+  }, [activePromptVersion?.id, canRequestQuote, draft, quoteNonce, signature, step]);
 
   if (!draft) {
     return (
@@ -334,22 +686,29 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           .map(validateInfluencerReferenceUrl)
           .find(Boolean) ?? null
       : null;
-  const quoteCurrent = quoteForSignature === signature && !isQuoteExpired(quote);
-  const hasPendingRecovery = Boolean(pendingRecovery || corruptPendingRecovery);
-  const canReplayPending = Boolean(
-    pendingRecovery &&
-      quoteCurrent &&
-      quote?.quoteId === pendingRecovery.quoteId &&
-      pendingRecovery.clientRequestId === clientRequestId,
+  const quotePromptVersionCurrent = isQuotePromptVersionCurrent(
+    draft.promptVersionId,
+    activePromptVersion?.id ?? null,
+    quote?.promptVersion?.id ?? null,
   );
+  const quoteCurrent =
+    quoteForSignature === signature && !isQuoteExpired(quote) && quotePromptVersionCurrent;
+  const hasPendingRecovery = Boolean(pendingRecovery || corruptPendingRecovery);
+  const canRecoverPending = Boolean(
+    pendingRecovery?.requestBody &&
+      (pendingLookupStatus === 'not-found' || pendingLookupStatus === 'recoverable'),
+  );
+  const quoteUpperMissing = Boolean(quoteCurrent && quote?.maxTotalUsd == null);
   const insufficientBalance = Boolean(
     quoteCurrent &&
+      quote?.maxTotalUsd != null &&
       quote?.availableBalanceUsd != null &&
       quote.availableBalanceUsd < quote.maxTotalUsd,
   );
 
   function update<Key extends keyof CreateDraft>(key: Key, value: CreateDraft[Key]) {
     if (submittingRef.current) return;
+    quoteVersionRecoveryAttemptsRef.current = 0;
     setDraft((current) => current && ({ ...current, [key]: value }));
     setQuote(null);
     setQuoteForSignature(null);
@@ -368,6 +727,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
 
   function requestQuoteAgain() {
     if (submittingRef.current) return;
+    quoteVersionRecoveryAttemptsRef.current = 0;
     setQuote(null);
     setQuoteForSignature(null);
     setQuoteError(null);
@@ -404,17 +764,59 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       !quote ||
       !quoteCurrent ||
       insufficientBalance ||
+      quoteUpperMissing ||
       submittingRef.current ||
-      (pendingRecovery && !pendingReplayArmed) ||
+      pendingRecovery ||
       corruptPendingRecovery
     ) return;
     submittingRef.current = true;
     setSubmitting(true);
     setSubmitError(null);
+    try {
+      const catalog = await studioApi.getPromptVersions();
+      const latestActive = getActivePromptVersionReference(catalog);
+      if (!latestActive) throw new Error('활성화된 프롬프트 버전이 없습니다.');
+      setActivePromptVersion(latestActive);
+      setPromptVersionError(null);
+      if (
+        !isQuotePromptVersionCurrent(
+          draft.promptVersionId,
+          latestActive.id,
+          quote.promptVersion?.id ?? null,
+        )
+      ) {
+        setDraft((current) =>
+          current ? { ...current, promptVersionId: latestActive.id } : current,
+        );
+        setQuote(null);
+        setQuoteForSignature(null);
+        setQuoteError(
+          '생성 직전 활성 프롬프트가 변경된 것을 확인해 최신 버전으로 새 견적을 계산합니다.',
+        );
+        submittingRef.current = false;
+        setSubmitting(false);
+        return;
+      }
+    } catch (error) {
+      setActivePromptVersion(null);
+      setDraft((current) => current ? { ...current, promptVersionId: null } : current);
+      setPromptVersionError(messageOf(error));
+      setSubmitError('활성 프롬프트를 다시 확인하지 못해 유료 생성 요청을 보내지 않았습니다.');
+      submittingRef.current = false;
+      setSubmitting(false);
+      return;
+    }
+    const generationInput = {
+      ...draft,
+      quoteId: quote.quoteId,
+      clientRequestId,
+    };
     const pending = {
       clientRequestId,
       quoteId: quote.quoteId,
       createdAt: new Date().toISOString(),
+      request: snapshotDraft(draft),
+      requestBody: studioApi.prepareGenerationRequest(generationInput),
     };
     if (!persistPendingSubmission(pending)) {
       submittingRef.current = false;
@@ -426,15 +828,13 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       return;
     }
     try {
-      const jobId = await studioApi.startGeneration({
-        ...draft,
-        quoteId: quote.quoteId,
+      const jobId = await studioApi.startPreparedGeneration(
+        pending.requestBody,
         clientRequestId,
-      });
+      );
       clearPendingSubmission();
       setPendingRecovery(null);
       setCorruptPendingRecovery(false);
-      setPendingReplayArmed(false);
       try {
         window.sessionStorage.setItem('quedot.last-generation-job', jobId);
       } catch {
@@ -442,60 +842,52 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
       }
       router.push(`/videos/${encodeURIComponent(jobId)}`);
     } catch (error) {
-      const status = error instanceof StudioApiError ? error.status : null;
-      const explicitRejection = isExplicitSubmissionRejection(status);
-      const requote =
-        status === 409 ||
-        (error instanceof StudioApiError &&
-          ['QUOTE_EXPIRED', 'QUOTE_MISMATCH', 'QUOTE_STALE', 'IDEMPOTENCY_CONFLICT'].includes(
-            error.code ?? '',
-          ));
-      if (explicitRejection) {
-        clearPendingSubmission();
-        setPendingRecovery(null);
-        setCorruptPendingRecovery(false);
-        setPendingReplayArmed(false);
-        setClientRequestId(createRequestId());
-        if (requote) {
-          setQuote(null);
-          setQuoteForSignature(null);
-          setQuoteError(null);
-          setQuoteNonce((value) => value + 1);
-          const code = error instanceof StudioApiError && error.code ? ` [${error.code}]` : '';
-          setSubmitError(`${messageOf(error)}${code} 최신 조건으로 견적을 다시 계산합니다.`);
-        } else {
-          setSubmitError(messageOf(error));
-        }
-      } else {
-        setPendingRecovery(pending);
-        setPendingReplayArmed(false);
-        setSubmitError(
-          `${messageOf(error)} 접수 여부를 확인할 수 없어 자동 재전송을 막았습니다. 먼저 라이브러리에서 작업을 확인해 주세요.`,
-        );
-      }
+      setPendingRecovery(pending);
+      setPendingLookupStatus('error');
+      setPendingLookupMessage(
+        `${messageOf(error)} 서버 예약 상태를 확인할 때까지 기존 요청 잠금을 유지합니다.`,
+      );
+      setPendingLookupNonce((value) => value + 1);
+      setSubmitError(
+        '접수 응답을 확정하지 못했습니다. 새 요청 ID를 만들지 않고 서버 예약 상태를 조회합니다.',
+      );
       submittingRef.current = false;
       setSubmitting(false);
     }
   }
 
-  function prepareSameRequestRetry() {
-    if (!pendingRecovery || pendingRecovery.clientRequestId !== clientRequestId) return;
-    setPendingReplayArmed(true);
-    setSubmitError(
-      '같은 client_request_id로 한 번 더 전송할 준비가 됐습니다. 서버가 이전 요청을 접수했다면 기존 작업만 반환해야 합니다.',
-    );
-  }
-
-  function startFreshAfterRecoveryCheck() {
-    clearPendingSubmission();
-    setPendingRecovery(null);
-    setCorruptPendingRecovery(false);
-    setPendingReplayArmed(false);
-    setQuote(null);
-    setQuoteForSignature(null);
-    setClientRequestId(createRequestId());
-    setSubmitError('새 요청 ID를 준비했습니다. 서버 견적을 다시 확인한 뒤 생성해 주세요.');
-    setQuoteNonce((value) => value + 1);
+  async function recoverSameRequest() {
+    if (!pendingRecovery?.requestBody || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    setSubmitError(null);
+    setPendingLookupStatus('checking');
+    setPendingLookupMessage('저장된 본문과 동일한 요청 ID로 접수 결과를 복구하고 있습니다.');
+    try {
+      const jobId = await studioApi.startPreparedGeneration(
+        pendingRecovery.requestBody,
+        pendingRecovery.clientRequestId,
+      );
+      clearPendingSubmission();
+      setPendingRecovery(null);
+      setCorruptPendingRecovery(false);
+      try {
+        window.sessionStorage.setItem('quedot.last-generation-job', jobId);
+      } catch {
+        // The destination URL carries the durable job ID.
+      }
+      router.push(`/videos/${encodeURIComponent(jobId)}`);
+    } catch (error) {
+      const code = error instanceof StudioApiError ? error.code : null;
+      setPendingLookupStatus('error');
+      setPendingLookupMessage(
+        `${messageOf(error)}${code ? ` [${code}]` : ''} 서버 예약 상태로 최종 확인할 때까지 기존 요청 잠금을 유지합니다.`,
+      );
+      setPendingLookupNonce((value) => value + 1);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   }
 
   return (
@@ -512,37 +904,68 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
         </div>
       )}
 
+      {promptVersionError && (
+        <div className="notice-banner warning" role="alert">
+          활성 프롬프트를 확인하지 못해 견적과 생성을 잠갔습니다. {promptVersionError}{' '}
+          <Link href="/settings/prompts">프롬프트 설정 열기</Link>
+        </div>
+      )}
+
       {hasPendingRecovery && (
-        <div className="recovery-banner" role="alert">
+        <div className="recovery-banner" role="status" aria-live="polite">
           <div>
             <strong>이전 생성 요청의 접수 결과를 확인해야 합니다</strong>
             <p>
-              응답이 끊긴 요청을 새 ID로 자동 전송하지 않습니다. 먼저 라이브러리에서 작업을 확인해
-              주세요.
+              응답이 끊긴 요청에는 새 ID를 발급하지 않습니다. 서버 조회 또는 저장된 동일 본문·동일
+              요청 ID 복구만 허용합니다.
               {pendingRecovery && (
                 <> 요청 ID 끝자리 <code>{pendingRecovery.clientRequestId.slice(-8)}</code></>
               )}
             </p>
+            {pendingLookupStatus === 'in-progress' && <p>원래 요청 처리가 끝날 때까지 자동으로 다시 확인합니다.</p>}
+            {pendingLookupMessage && <p>{pendingLookupMessage}</p>}
+            {corruptPendingRecovery && (
+              <p>로컬 복구 기록이 손상되어 요청 ID를 안전하게 확인할 수 없습니다. 새 생성은 차단되며 운영자 확인이 필요합니다.</p>
+            )}
+            {pendingRecovery && !pendingRecovery.requestBody && (
+              <p>이전 버전의 잠금 기록에는 직렬화된 원본 본문이 없어 동일 요청 재전송을 할 수 없습니다. 서버 접수 조회 또는 운영자 확인만 가능합니다.</p>
+            )}
           </div>
           <div className="inline-actions">
             <Link className="button button-secondary" href="/videos">라이브러리 확인</Link>
-            {canReplayPending && !pendingReplayArmed && (
-              <button className="button button-secondary" type="button" onClick={prepareSameRequestRetry}>
-                같은 요청 ID로 재전송 준비
+            {pendingRecovery && (
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={
+                  pendingLookupStatus === 'checking' ||
+                  pendingLookupStatus === 'in-progress' ||
+                  submitting
+                }
+                onClick={() => {
+                  setPendingLookupStatus('checking');
+                  setPendingLookupNonce((value) => value + 1);
+                }}
+              >
+                접수 상태 다시 확인
               </button>
             )}
-            {!canReplayPending && (
-              <button className="button button-ghost" type="button" onClick={startFreshAfterRecoveryCheck}>
-                확인 완료 · 새 요청 준비
+            {pendingRecovery && (
+              <button
+                className="button button-primary"
+                type="button"
+                disabled={
+                  !canRecoverPending ||
+                  submitting ||
+                  pendingLookupStatus === 'checking' ||
+                  pendingLookupStatus === 'in-progress'
+                }
+                onClick={recoverSameRequest}
+              >
+                {submitting ? '동일 요청 복구 중…' : '같은 요청 ID로 안전 복구'}
               </button>
             )}
           </div>
-        </div>
-      )}
-
-      {pendingReplayArmed && (
-        <div className="notice-banner warning" role="status">
-          수동 복구 모드입니다. 생성 버튼은 저장된 client_request_id를 그대로 재사용합니다.
         </div>
       )}
 
@@ -564,7 +987,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
 
       <div className="create-layout">
         <section className="panel create-panel" aria-busy={submitting}>
-          <fieldset className="wizard-fieldset" disabled={submitting}>
+          <fieldset className="wizard-fieldset" disabled={submitting || hasPendingRecovery}>
           {step === 'product' && (
             <ProductStep draft={draft} onProduct={(product) => update('product', product)} caveat={caveat} />
           )}
@@ -593,6 +1016,7 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
               quoteError={quoteError}
               caveat={caveat}
               insufficientBalance={insufficientBalance}
+              quoteUpperMissing={quoteUpperMissing}
               onRetryQuote={requestQuoteAgain}
             />
           )}
@@ -624,8 +1048,9 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
                   !quoteCurrent ||
                   quoteLoading ||
                   insufficientBalance ||
+                  quoteUpperMissing ||
                   submitting ||
-                  (hasPendingRecovery && !pendingReplayArmed)
+                  hasPendingRecovery
                 }
                 onClick={submitGeneration}
               >
@@ -648,6 +1073,22 @@ export function CreateWizard({ sourceJobId }: { sourceJobId: string | null }) {
           <SummaryRow label="영상 전략" value={draft.template?.name ?? '선택 전'} />
           <SummaryRow label="출연 방식" value={visualModeLabel(draft.visualMode)} />
           <SummaryRow label="후보 수" value={`${draft.outputCount}개`} />
+          <SummaryRow
+            label="프롬프트"
+            value={
+              pendingRecovery
+                ? `요청 스냅샷 · ${
+                    (typeof pendingRecovery.requestBody?.prompt_version_id === 'string'
+                      ? pendingRecovery.requestBody.prompt_version_id
+                      : pendingRecovery.request?.promptVersionId) ?? '버전 기록 없음'
+                  }`
+                : quoteCurrent && quote?.promptVersion
+                  ? `${quote.promptVersion.name} · v${quote.promptVersion.version}`
+                  : promptVersionLoading
+                    ? '견적 버전 확인 중'
+                    : '견적에서 확정 대기'
+            }
+          />
           <SummaryRow label="화면" value="9:16 · 1080 × 1920" />
           {quoteCurrent && quote && (
             <div className="summary-cost"><span>예상 비용</span><strong>{formatUsd(quote.expectedTotalUsd)}</strong></div>
@@ -874,6 +1315,7 @@ function ReviewStep({
   quoteError,
   caveat,
   insufficientBalance,
+  quoteUpperMissing,
   onRetryQuote,
 }: {
   draft: CreateDraft;
@@ -882,6 +1324,7 @@ function ReviewStep({
   quoteError: string | null;
   caveat: string | null;
   insufficientBalance: boolean;
+  quoteUpperMissing: boolean;
   onRetryQuote: () => void;
 }) {
   return (
@@ -890,6 +1333,18 @@ function ReviewStep({
         <span>4</span><div><h2>설정과 예상 비용을 확인하세요</h2><p>버튼을 누르면 스크립트부터 최종 후보까지 비동기로 생성합니다.</p></div>
       </div>
       {draft.template && <TimelineDetail template={draft.template} />}
+      <div className="prompt-version-note" role="note">
+        <div>
+          <strong>적용 프롬프트</strong>
+          <span>
+            {quote?.promptVersion
+              ? `${quote.promptVersion.name} · v${quote.promptVersion.version}`
+              : '견적에서 버전 스냅샷 확정 대기'}
+          </span>
+        </div>
+        <Link href="/settings/prompts">버전 관리</Link>
+        <p>견적과 작업을 접수할 때 활성 버전을 스냅샷으로 고정하며, 이후 활성화 변경은 신규 작업부터 적용됩니다.</p>
+      </div>
       {caveat && <div className="asset-caveat" role="note"><strong>상품 에셋 주의</strong><p>{caveat}</p></div>}
 
       <section className="quote-card" aria-labelledby="quote-title" aria-busy={quoteLoading}>
@@ -908,6 +1363,12 @@ function ReviewStep({
             {quote.lineItems.length > 0 && <ul className="quote-lines">{quote.lineItems.map((item) => <li key={item.key}><span>{item.label}</span><strong>{formatUsd(item.amountUsd)}</strong></li>)}</ul>}
             {quote.coverage && <p className="quote-coverage">견적 범위: {quote.coverage === 'video_only' ? '영상 provider 비용만 포함' : quote.coverage}</p>}
             {quote.disclaimer && <p className="quote-disclaimer">{quote.disclaimer}</p>}
+            {quote.promptVersion && (
+              <p className="quote-coverage">
+                견적 프롬프트: {quote.promptVersion.name} · v{quote.promptVersion.version}
+              </p>
+            )}
+            {quoteUpperMissing && <p className="field-error" role="alert">Provider 예상 범위 상단이 없어 유료 생성을 시작할 수 없습니다. 견적을 다시 계산해 주세요.</p>}
             {insufficientBalance && <p className="field-error" role="alert">Provider 예상 범위 상단보다 사용 가능 잔액이 적어 생성을 시작할 수 없습니다. 이 값은 결제 상한 승인이 아닙니다.</p>}
             <p className="quote-disclaimer">표시 범위는 영상 provider 추정치이며 결제 상한이나 승인 금액이 아닙니다. TTS·렌더링·저장·재시도 비용은 포함하지 않습니다.</p>
             <small>견적 ID {quote.quoteId}{quote.expiresAt ? ` · ${new Date(quote.expiresAt).toLocaleTimeString('ko-KR')}까지 유효` : ''}</small>

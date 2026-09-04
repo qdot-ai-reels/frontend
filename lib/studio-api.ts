@@ -1,5 +1,11 @@
 import { activeInfluencerReferenceUrls } from './influencer-references';
 import {
+  normalizePromptVersion,
+  normalizePromptVersionCatalog,
+  normalizePromptVersionReference,
+} from './prompt-versions';
+import {
+  isIdentityReferenceProductionEnabled,
   normalizeStudioScript,
   parseApiDate,
   resolveSafeMediaUrl,
@@ -17,8 +23,12 @@ import type {
   GenerationListResult,
   GenerationListSummary,
   GenerationQuote,
+  GenerationRequestLookup,
   GenerationTemplate,
   JobTemplateSnapshot,
+  PromptTemplates,
+  PromptVersion,
+  PromptVersionCatalog,
   QuoteLineItem,
   StartGenerationInput,
   StudioJob,
@@ -31,7 +41,7 @@ import type {
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ??
-  'http://localhost:8000';
+  'http://127.0.0.1:8001';
 
 const DEFAULT_BACKEND_VIDEO_MODEL_ID = 'bytedance/seedance-2.0';
 const PUBLIC_VIDEO_MODEL_ID =
@@ -513,6 +523,24 @@ export function normalizeJob(value: unknown): StudioJob {
       (asBoolean(assetFidelity.package_text_verified) === false
         ? '패키지 수량과 작은 글자는 시각적으로 검증되지 않았습니다.'
         : null),
+    promptVersion: normalizePromptVersionReference(
+      firstDefined(
+        raw.prompt_version,
+        raw.prompt_snapshot,
+        raw.prompt_bundle,
+        payload.prompt_version,
+        payload.prompt_snapshot,
+        payload.prompt_bundle,
+        payload.prompt_version_id
+          ? {
+              id: payload.prompt_version_id,
+              version: payload.prompt_version_number,
+              name: payload.prompt_version_name,
+              content_sha256: payload.prompt_content_sha256,
+            }
+          : null,
+      ),
+    ),
     candidates,
   };
 }
@@ -586,37 +614,80 @@ function normalizeQuote(value: unknown): GenerationQuote {
     configHash: asString(firstDefined(raw.config_hash, raw.configHash)),
     currency: 'USD',
     expectedTotalUsd: expected,
-    maxTotalUsd:
-      asNumber(
-        firstDefined(raw.max_total_usd, raw.max_authorized_cost_usd, raw.maximum_cost_usd, total.max),
-      ) ??
-      expected,
+    maxTotalUsd: asNumber(
+      firstDefined(raw.max_total_usd, raw.max_authorized_cost_usd, raw.maximum_cost_usd, total.max),
+    ),
     availableBalanceUsd: asNumber(firstDefined(raw.available_balance_usd, raw.balance_usd)),
     expiresAt: asString(firstDefined(raw.expires_at, raw.expiresAt)),
     coverage: asString(raw.coverage),
     disclaimer: asString(raw.disclaimer),
     lineItems: asArray(firstDefined(raw.line_items, raw.breakdown, raw.items)).map(normalizeLineItem),
+    promptVersion: normalizePromptVersionReference(
+      firstDefined(
+        raw.prompt_version,
+        raw.prompt_snapshot,
+        raw.prompt_bundle,
+        raw.prompt_version_id
+          ? {
+              id: raw.prompt_version_id,
+              version: raw.prompt_version_number,
+              name: raw.prompt_version_name,
+              content_sha256: raw.prompt_content_sha256,
+            }
+          : null,
+      ),
+    ),
   };
 }
 
-function buildPrompt(draft: CreateDraft): string {
-  return [
-    `광고 목적: ${draft.advertisingPurpose}`,
-    `CTA: ${draft.cta}`,
-    draft.visualMode === 'model_included'
-      ? '장면 구성: 제공된 동일 모델의 얼굴과 의상을 유지하고 상품을 가리지 않게 소개. 립싱크 금지'
-      : draft.visualMode === 'generated_model'
-        ? '장면 구성: 실존 인물을 모사하지 않는 성인 한국인 AI 가상 모델 한 명과 상품을 일관되게 유지. 립싱크 금지'
-        : '장면 구성: 인물이나 모델 없이 상품만 사용',
-    draft.mustInclude && `반드시 포함: ${draft.mustInclude}`,
-    draft.mustExclude && `포함 금지: ${draft.mustExclude}`,
-    draft.extraDetails && `추가 요청: ${draft.extraDetails}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+function buildGenerationRequestBody(input: StartGenerationInput): Record<string, unknown> {
+  if (!input.template) throw new Error('생성할 템플릿이 없습니다.');
+  if (!input.promptVersionId) throw new Error('활성 프롬프트 버전을 확인해 주세요.');
+  const references =
+    input.visualMode === 'model_included'
+      ? activeInfluencerReferenceUrls(input.influencerImageUrls)
+      : [];
+  const body: Record<string, unknown> = {
+    product: input.product.rawProduct,
+    image_url: input.product.imageUrl,
+    visual_mode: input.visualMode,
+    prompt_version_id: input.promptVersionId,
+    creative_brief: {
+      advertising_purpose: input.advertisingPurpose,
+      cta: input.cta,
+      visual_mode: input.visualMode,
+      channel: input.channel,
+      must_include: input.mustInclude || null,
+      must_exclude: input.mustExclude || null,
+      extra_details: input.extraDetails || null,
+    },
+    max_duration_seconds: input.template.durationSeconds,
+    channel: input.channel,
+    candidate_count: input.outputCount,
+    square_output_strategy:
+      input.visualMode === 'model_included'
+        ? 'reject'
+        : input.product.squareOutputStrategy ?? 'reject',
+    template_id: input.template.id,
+    template_version: input.template.version,
+    quote_id: input.quoteId,
+    client_request_id: input.clientRequestId,
+    cta: input.cta,
+    advertising_purpose: input.advertisingPurpose,
+    must_include: input.mustInclude || null,
+    must_exclude: input.mustExclude || null,
+    extra_details: input.extraDetails || null,
+    resolution: '1080p',
+  };
+  if (references.length > 0) body.influencer_image_urls = references;
+  return body;
 }
 
 export const studioApi = {
+  prepareGenerationRequest(input: StartGenerationInput): Record<string, unknown> {
+    return buildGenerationRequestBody(input);
+  },
+
   async getTemplates(signal?: AbortSignal): Promise<GenerationTemplate[]> {
     const response = await fetch(apiUrl('/api/v1/reels/generation-templates'), {
       cache: 'no-store',
@@ -648,6 +719,7 @@ export const studioApi = {
         candidate_count: draft.outputCount,
         visual_mode: draft.visualMode,
         resolution: '1080p',
+        prompt_version_id: draft.promptVersionId,
       }),
     });
     if (!response.ok) throw await readError(response, '생성 전 비용을 계산하지 못했습니다.');
@@ -659,25 +731,72 @@ export const studioApi = {
     supportsIdentityReference: boolean;
     known: boolean;
   }> {
-    let modelId = PUBLIC_VIDEO_MODEL_ID;
-    try {
-      const response = await fetch(apiUrl('/api/v1/settings'), {
-        cache: 'no-store',
-        signal,
-      });
-      if (response.ok) {
-        const payload = asRecord(await response.json());
-        modelId = asString(payload.openrouter_video_model) ?? modelId;
-      }
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      // A public build-time model ID can still provide a safe capability gate.
-    }
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const modelId = PUBLIC_VIDEO_MODEL_ID;
     return {
       modelId,
-      supportsIdentityReference: Boolean(modelId?.startsWith('bytedance/seedance-2.')),
+      // The current Seedance route rejected both real and synthetic portrait
+      // references at the provider privacy gate. Never infer production support
+      // from a model-name prefix; it must be enabled by an explicit audited
+      // deployment capability.
+      supportsIdentityReference: isIdentityReferenceProductionEnabled(
+        modelId,
+        process.env.NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED,
+      ),
       known: Boolean(modelId),
     };
+  },
+
+  async getPromptVersions(signal?: AbortSignal): Promise<PromptVersionCatalog> {
+    const response = await fetch(apiUrl('/api/v1/reels/prompt-versions'), {
+      cache: 'no-store',
+      signal,
+    });
+    if (!response.ok) {
+      throw await readError(response, '프롬프트 버전을 불러오지 못했습니다.');
+    }
+    return normalizePromptVersionCatalog(await response.json());
+  },
+
+  async createPromptVersion(
+    input: { name: string; description: string; templates: PromptTemplates },
+    signal?: AbortSignal,
+  ): Promise<PromptVersion> {
+    const response = await fetch(apiUrl('/api/v1/reels/prompt-versions'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal,
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw await readError(response, '새 프롬프트 버전을 저장하지 못했습니다.');
+    const responseText = await response.text();
+    let payload: unknown;
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      throw new Error('서버가 저장된 프롬프트 버전 JSON을 반환하지 않았습니다.');
+    }
+    const normalized = normalizePromptVersion(
+      firstDefined(
+        asRecord(payload).version,
+        asRecord(payload).item,
+        asRecord(payload).data,
+        payload,
+      ),
+    );
+    if (!normalized) throw new Error('서버가 저장된 프롬프트 버전을 올바르게 반환하지 않았습니다.');
+    return normalized;
+  },
+
+  async activatePromptVersion(id: string, signal?: AbortSignal): Promise<void> {
+    const response = await fetch(
+      apiUrl(`/api/v1/reels/prompt-versions/${encodeURIComponent(id)}/activate`),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, signal },
+    );
+    if (!response.ok) throw await readError(response, '프롬프트 버전을 활성화하지 못했습니다.');
+    // The mutation response is only an acknowledgement. Callers must re-fetch the
+    // catalog so the server's persisted active_bundle_id remains authoritative.
+    await response.text();
   },
 
   async getGenerations(
@@ -717,42 +836,81 @@ export const studioApi = {
     return normalizeJob(await response.json());
   },
 
-  async startGeneration(input: StartGenerationInput, signal?: AbortSignal): Promise<string> {
-    if (!input.template) throw new Error('생성할 템플릿이 없습니다.');
-    const references =
-      input.visualMode === 'model_included'
-        ? activeInfluencerReferenceUrls(input.influencerImageUrls)
-        : [];
-    const body: Record<string, unknown> = {
-      product: input.product.rawProduct,
-      image_url: input.product.imageUrl,
-      visual_mode: input.visualMode,
-      prompt: buildPrompt(input),
-      max_duration_seconds: input.template.durationSeconds,
-      channel: input.channel,
-      candidate_count: input.outputCount,
-      square_output_strategy:
-        input.visualMode === 'model_included'
-          ? 'reject'
-          : input.product.squareOutputStrategy ?? 'reject',
-      template_id: input.template.id,
-      template_version: input.template.version,
-      quote_id: input.quoteId,
-      client_request_id: input.clientRequestId,
-      cta: input.cta,
-      advertising_purpose: input.advertisingPurpose,
-      must_include: input.mustInclude || null,
-      must_exclude: input.mustExclude || null,
-      extra_details: input.extraDetails || null,
-      resolution: '1080p',
+  async getGenerationRequest(
+    clientRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<GenerationRequestLookup> {
+    const response = await fetch(
+      apiUrl(`/api/v1/reels/generation-requests/${encodeURIComponent(clientRequestId)}`),
+      { cache: 'no-store', signal },
+    );
+    if (!response.ok) {
+      throw await readError(response, '이전 생성 요청의 접수 상태를 확인하지 못했습니다.');
+    }
+    const payload = asRecord(await response.json());
+    const jobId = asString(firstDefined(payload.job_id, payload.jobId));
+    const echoedClientRequestId = asString(
+      firstDefined(payload.client_request_id, payload.clientRequestId),
+    );
+    const requestState = asString(firstDefined(payload.request_state, payload.requestState));
+    if (
+      echoedClientRequestId !== clientRequestId ||
+      (requestState !== 'IN_PROGRESS' &&
+        requestState !== 'ACCEPTED' &&
+        requestState !== 'REJECTED') ||
+      (requestState === 'ACCEPTED' && !jobId)
+    ) {
+      throw new Error('서버가 유효한 생성 요청 복구 정보를 반환하지 않았습니다.');
+    }
+    const statusValue = asString(payload.status);
+    const status = statusValue === 'REJECTED' ? 'REJECTED' : asStatus(statusValue);
+    const stageValue = asString(payload.stage);
+    const stage =
+      stageValue === 'REQUEST_VALIDATION' || stageValue === 'REQUEST_REJECTED'
+        ? stageValue
+        : asStage(stageValue);
+    const errorValue = asRecord(payload.error);
+    const errorCode = asString(errorValue.code);
+    const errorMessage = asString(errorValue.message);
+    const errorHttpStatus = asNumber(
+      firstDefined(errorValue.http_status, errorValue.httpStatus),
+    );
+    return {
+      clientRequestId: echoedClientRequestId,
+      requestState,
+      jobId,
+      status,
+      stage,
+      statusUrl: asString(firstDefined(payload.status_url, payload.statusUrl)),
+      recoverable: asBoolean(payload.recoverable) ?? false,
+      retryAfterSeconds: asNumber(
+        firstDefined(payload.retry_after_seconds, payload.retryAfterSeconds),
+      ),
+      error:
+        errorCode && errorMessage && errorHttpStatus != null
+          ? { code: errorCode, message: errorMessage, httpStatus: errorHttpStatus }
+          : null,
     };
-    if (references.length > 0) body.influencer_image_urls = references;
+  },
 
+  async startGeneration(input: StartGenerationInput, signal?: AbortSignal): Promise<string> {
+    const body = buildGenerationRequestBody(input);
+    return this.startPreparedGeneration(body, input.clientRequestId, signal);
+  },
+
+  async startPreparedGeneration(
+    body: Record<string, unknown>,
+    clientRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (body.client_request_id !== clientRequestId) {
+      throw new Error('저장된 생성 요청 ID가 복구 키와 일치하지 않습니다.');
+    }
     const response = await fetch(apiUrl('/api/v1/reels/generate'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Idempotency-Key': input.clientRequestId,
+        'Idempotency-Key': clientRequestId,
       },
       signal,
       body: JSON.stringify(body),

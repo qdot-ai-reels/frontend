@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 const NAV_ITEMS = [
   { href: '/videos', label: '영상 라이브러리', shortLabel: '라이브러리', icon: '▦' },
   { href: '/create', label: '새 영상 만들기', shortLabel: '새 영상', icon: '+' },
+  { href: '/settings/prompts', label: '프롬프트 설정', shortLabel: '프롬프트', icon: 'P' },
 ] as const;
 
 export function StudioNav() {

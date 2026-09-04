@@ -51,6 +51,24 @@ function mergePages(pages: Map<string, GenerationListResult>): GenerationListRes
   };
 }
 
+async function loadPageChain(
+  filters: GenerationFilters,
+  pageCount: number,
+  signal: AbortSignal,
+): Promise<{ pages: Map<string, GenerationListResult>; result: GenerationListResult }> {
+  const pages = new Map<string, GenerationListResult>();
+  let cursor: string | undefined;
+
+  for (let index = 0; index < pageCount; index += 1) {
+    const page = await studioApi.getGenerations({ ...filters, cursor }, signal);
+    pages.set(cursor ?? 'root', page);
+    if (!page.nextCursor) break;
+    cursor = page.nextCursor;
+  }
+
+  return { pages, result: mergePages(pages) };
+}
+
 export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFilters }) {
   const router = useRouter();
   const [filters, setFilters] = useState(initialFilters);
@@ -59,11 +77,15 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  const [stale, setStale] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const latestRequest = useRef(0);
+  const latestFetch = useRef(0);
+  const loadedPageCount = useRef(1);
   const pagesRef = useRef<Map<string, GenerationListResult>>(new Map());
   const loadMoreController = useRef<AbortController | null>(null);
   const canonicalizedUrl = useRef(false);
+  const activeFilterKey = useRef('');
 
   const updateUrl = useCallback(
     (next: GenerationFilters) => {
@@ -98,33 +120,56 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
     let timer: number | null = null;
     let controller: AbortController | null = null;
     const requestId = ++latestRequest.current;
-    pagesRef.current = new Map();
-    loadMoreController.current?.abort();
+    const filterKey = JSON.stringify(filters);
+    const filtersChanged = activeFilterKey.current !== filterKey;
+    activeFilterKey.current = filterKey;
+    if (filtersChanged) {
+      pagesRef.current = new Map();
+      loadedPageCount.current = 1;
+      loadMoreController.current?.abort();
+      setStale(false);
+    }
 
     async function load() {
       if (document.visibilityState === 'hidden' || !navigator.onLine) {
         const isOffline = !navigator.onLine;
         setOffline(isOffline);
-        if (isOffline) setLoading(false);
+        if (isOffline) {
+          setStale(pagesRef.current.size > 0);
+          setLoading(false);
+        }
         timer = window.setTimeout(load, 5_000);
         return;
       }
       setOffline(false);
       controller?.abort();
       controller = new AbortController();
+      const fetchId = ++latestFetch.current;
       try {
-        const next = await studioApi.getGenerations(filters, controller.signal);
-        if (disposed || requestId !== latestRequest.current) return;
-        pagesRef.current.set('root', next);
-        setResult(mergePages(pagesRef.current));
+        const chain = await loadPageChain(filters, loadedPageCount.current, controller.signal);
+        if (
+          disposed ||
+          requestId !== latestRequest.current ||
+          fetchId !== latestFetch.current
+        ) return;
+        pagesRef.current = chain.pages;
+        loadedPageCount.current = Math.max(1, chain.pages.size);
+        setResult(chain.result);
         setError(null);
+        setStale(false);
         setLoading(false);
-        if (next.items.some((job) => isJobActive(job.status))) {
+        if (chain.result.items.some((job) => isJobActive(job.status))) {
           timer = window.setTimeout(load, 4_000);
         }
       } catch (requestError) {
-        if (disposed || controller.signal.aborted) return;
+        if (
+          disposed ||
+          controller.signal.aborted ||
+          requestId !== latestRequest.current ||
+          fetchId !== latestFetch.current
+        ) return;
         setError(errorMessage(requestError));
+        setStale(pagesRef.current.size > 0);
         setLoading(false);
         timer = window.setTimeout(load, 10_000);
       }
@@ -132,13 +177,17 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
 
     const debounce = filters.query ? 300 : 0;
     timer = window.setTimeout(() => {
-      setResult(EMPTY_RESULT);
-      setLoading(true);
+      if (filtersChanged) {
+        setResult(EMPTY_RESULT);
+        setLoading(true);
+      }
       setLoadingMore(false);
       void load();
     }, debounce);
     const resume = () => {
-      setOffline(!navigator.onLine);
+      const isOffline = !navigator.onLine;
+      setOffline(isOffline);
+      if (isOffline) setStale(pagesRef.current.size > 0);
       if (document.visibilityState === 'visible' && navigator.onLine) {
         if (timer != null) window.clearTimeout(timer);
         void load();
@@ -159,23 +208,41 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
 
   async function loadMore() {
     if (!result.nextCursor || loadingMore) return;
-    const cursor = result.nextCursor;
     const requestId = latestRequest.current;
+    const requestedPageCount = loadedPageCount.current + 1;
     loadMoreController.current?.abort();
     const controller = new AbortController();
     loadMoreController.current = controller;
+    const fetchId = ++latestFetch.current;
     setLoadingMore(true);
     setError(null);
     try {
-      const next = await studioApi.getGenerations(
-        { ...filters, cursor },
-        controller.signal,
-      );
-      if (requestId !== latestRequest.current || controller.signal.aborted) return;
-      pagesRef.current.set(cursor, next);
-      setResult(mergePages(pagesRef.current));
+      const chain = await loadPageChain(filters, requestedPageCount, controller.signal);
+      if (
+        requestId !== latestRequest.current ||
+        controller.signal.aborted ||
+        fetchId !== latestFetch.current
+      ) return;
+      pagesRef.current = chain.pages;
+      loadedPageCount.current = Math.max(1, chain.pages.size);
+      setResult(chain.result);
+      setOffline(false);
+      setStale(false);
+      if (chain.result.items.some((job) => isJobActive(job.status))) {
+        setRefreshKey((value) => value + 1);
+      }
     } catch (requestError) {
-      if (!controller.signal.aborted) setError(errorMessage(requestError));
+      if (
+        !controller.signal.aborted &&
+        requestId === latestRequest.current &&
+        fetchId === latestFetch.current
+      ) {
+        setError(errorMessage(requestError));
+        setStale(pagesRef.current.size > 0);
+        if (result.items.some((job) => isJobActive(job.status))) {
+          setRefreshKey((value) => value + 1);
+        }
+      }
     } finally {
       if (loadMoreController.current === controller) {
         loadMoreController.current = null;
@@ -189,6 +256,7 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
     () => result.items.filter((job) => isJobActive(job.status)).length,
     [result.items],
   );
+  const displayingStaleData = result.items.length > 0 && (stale || offline || Boolean(error));
   const visibleSummary = useMemo(
     () => ({
       total: result.items.length,
@@ -218,7 +286,7 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
 
       <section className="summary-grid" aria-label="영상 작업 요약">
         <SummaryCard label="조회 결과" value={`${visibleSummary.total}개`} />
-        <SummaryCard label="진행 중" value={`${visibleSummary.processing}개`} accent={activeJobs > 0} />
+        <SummaryCard label="진행 중" value={`${visibleSummary.processing}개`} accent={activeJobs > 0 && !displayingStaleData} />
         <SummaryCard label="사용 가능" value={`${visibleSummary.ready}개`} tone="success" />
         <SummaryCard label="확인 필요" value={`${visibleSummary.needsAttention}개`} tone="danger" />
         <SummaryCard label="표시 작업 실제 비용" value={formatUsd(visibleSummary.actualCostUsd)} />
@@ -228,9 +296,14 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
         <div className="panel-heading">
           <div>
             <h2 id="library-title">영상 작업</h2>
-            <p>작업을 열면 최신 진행 상태와 후보별 검수 결과가 자동으로 갱신됩니다.</p>
+            <p>{displayingStaleData ? '마지막으로 확인한 목록을 표시하고 있습니다.' : '작업을 열면 최신 진행 상태와 후보별 검수 결과가 자동으로 갱신됩니다.'}</p>
           </div>
-          {activeJobs > 0 && <span className="live-badge"><i aria-hidden="true" /> {activeJobs}개 진행 중</span>}
+          {activeJobs > 0 && (
+            <span className={displayingStaleData ? 'quiet-badge' : 'live-badge'}>
+              {!displayingStaleData && <i aria-hidden="true" />}
+              {displayingStaleData ? `마지막 확인 · 진행 중 ${activeJobs}개` : `${activeJobs}개 진행 중`}
+            </span>
+          )}
         </div>
 
         <div className="library-filters" role="search">
@@ -298,8 +371,14 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
 
         {error && (
           <div className="inline-alert" role="alert">
-            <span>{error}</span>
+            <span>{error}{result.items.length > 0 ? ' 마지막으로 확인한 목록을 유지합니다.' : ''}</span>
             <button type="button" onClick={() => setRefreshKey((value) => value + 1)}>다시 시도</button>
+          </div>
+        )}
+
+        {displayingStaleData && (
+          <div className="notice-banner warning" role="status">
+            현재 목록은 실시간 상태가 아닙니다. 연결이 복구되면 펼쳐 둔 모든 페이지를 처음부터 다시 확인합니다.
           </div>
         )}
 
@@ -331,7 +410,7 @@ export function VideoLibrary({ initialFilters }: { initialFilters: GenerationFil
           </div>
         ) : (
           <div className="job-list">
-            {result.items.map((job) => <JobRow job={job} key={job.jobId} />)}
+            {result.items.map((job) => <JobRow job={job} stale={displayingStaleData} key={job.jobId} />)}
           </div>
         )}
 
@@ -366,7 +445,7 @@ function SummaryCard({
   );
 }
 
-function JobRow({ job }: { job: StudioJob }) {
+function JobRow({ job, stale }: { job: StudioJob; stale: boolean }) {
   const candidate = job.candidates.find((item) => item.status === 'COMPLETED');
   const warning = job.assetWarning ?? assetCaveat(job.product.productId, job.product.name);
   return (
@@ -398,7 +477,9 @@ function JobRow({ job }: { job: StudioJob }) {
           <strong>{formatUsd(job.actualCostUsd ?? job.estimatedCostUsd)}</strong>
           <small>{job.actualCostUsd != null ? '실제 기록' : job.estimatedCostUsd != null ? '예상값' : '비용 미기록'}</small>
           <span>{formatDateTime(job.createdAt)}</span>
-          {isJobActive(job.status) && <small>{job.message ?? '작업을 처리하고 있습니다.'}</small>}
+          {isJobActive(job.status) && (
+            <small>{stale ? '마지막 확인 상태 · 실시간 아님' : job.message ?? '작업을 처리하고 있습니다.'}</small>
+          )}
         </div>
         <span className="row-arrow" aria-hidden="true">›</span>
       </Link>
