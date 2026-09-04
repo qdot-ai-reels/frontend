@@ -62,6 +62,8 @@ export function PromptSettings() {
   const savingRef = useRef(false);
   const activatingRef = useRef(false);
   const catalogRequestRef = useRef(0);
+  const activationTriggerRef = useRef<HTMLButtonElement>(null);
+  const activationCancelRef = useRef<HTMLButtonElement>(null);
 
   const selected = useMemo(
     () => catalog.versions.find((version) => version.id === selectedId) ?? null,
@@ -134,6 +136,62 @@ export function PromptSettings() {
     return () => window.clearTimeout(timer);
   }, [loadCatalog]);
 
+  useEffect(() => {
+    if (changedKeys.length === 0) return;
+
+    const confirmMessage =
+      '저장하지 않은 프롬프트 변경이 있습니다. 변경을 버리고 페이지를 이동할까요?';
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (savingRef.current) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    const handleLinkNavigation = (event: MouseEvent) => {
+      if (
+        savingRef.current ||
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const anchor = target?.closest<HTMLAnchorElement>('a[href]');
+      if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return;
+      const destination = new URL(anchor.href, window.location.href);
+      const current = new URL(window.location.href);
+      if (
+        destination.origin === current.origin &&
+        destination.pathname === current.pathname &&
+        destination.search === current.search
+      ) return;
+      if (!window.confirm(confirmMessage)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('click', handleLinkNavigation, true);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('click', handleLinkNavigation, true);
+    };
+  }, [changedKeys.length]);
+
+  useEffect(() => {
+    if (!activationTargetId) return;
+    activationCancelRef.current?.focus();
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setActivationTargetId(null);
+      window.requestAnimationFrame(() => activationTriggerRef.current?.focus());
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [activationTargetId]);
+
   function selectVersion(version: PromptVersion) {
     if (savingRef.current || activatingRef.current) return;
     if (changedKeys.length > 0) {
@@ -149,8 +207,14 @@ export function PromptSettings() {
 
   function updateTemplate(key: PromptTemplateKey, content: string) {
     if (savingRef.current || activatingRef.current) return;
+    setActivationTargetId(null);
     setTemplates((current) => ({ ...current, [key]: content }));
     setNotice(null);
+  }
+
+  function closeActivationDialog() {
+    setActivationTargetId(null);
+    window.requestAnimationFrame(() => activationTriggerRef.current?.focus());
   }
 
   async function saveVersion(event: React.FormEvent<HTMLFormElement>) {
@@ -187,6 +251,13 @@ export function PromptSettings() {
 
   async function activateVersion() {
     if (!activationTargetId || activatingRef.current || savingRef.current) return;
+    if (changedKeys.length > 0) {
+      setActivationTargetId(null);
+      setError(
+        '편집 중인 내용을 먼저 새 버전으로 저장한 뒤, 저장된 버전을 활성화해 주세요.',
+      );
+      return;
+    }
     const targetId = activationTargetId;
     activatingRef.current = true;
     setActivating(true);
@@ -296,9 +367,10 @@ export function PromptSettings() {
               </div>
               {selected && !selected.isActive && (
                 <button
+                  ref={activationTriggerRef}
                   className="button button-secondary"
                   type="button"
-                  disabled={saving || activating}
+                  disabled={saving || activating || changedKeys.length > 0}
                   onClick={() => setActivationTargetId(selected.id)}
                 >
                   이 버전 활성화 준비
@@ -310,15 +382,25 @@ export function PromptSettings() {
               활성화는 이후 생성되는 신규 견적과 작업에만 적용됩니다. 이미 접수됐거나 처리 중인
               작업은 job에 저장된 기존 prompt version snapshot을 계속 사용합니다.
             </p>
+            {selected && !selected.isActive && changedKeys.length > 0 && (
+              <p className="prompt-release-policy" role="status">
+                편집본은 아직 저장된 버전이 아닙니다. 아래에서 새 버전으로 저장하면 활성화할 수 있습니다.
+              </p>
+            )}
             {activationTargetId && (
-              <div className="prompt-activation-confirm" role="alertdialog" aria-labelledby="activation-title">
+              <div
+                className="prompt-activation-confirm"
+                role="alertdialog"
+                aria-labelledby="activation-title"
+                aria-describedby="activation-description"
+              >
                 <div>
                   <strong id="activation-title">활성 버전을 변경할까요?</strong>
-                  <p>진행 중 작업은 유지되고, 신규 견적과 생성부터 선택 버전이 적용됩니다.</p>
+                  <p id="activation-description">진행 중 작업은 유지되고, 신규 견적과 생성부터 선택 버전이 적용됩니다.</p>
                 </div>
                 <div className="inline-actions">
-                  <button className="button button-ghost" type="button" disabled={activating} onClick={() => setActivationTargetId(null)}>취소</button>
-                  <button className="button button-primary" type="button" disabled={saving || activating} onClick={() => void activateVersion()}>
+                  <button ref={activationCancelRef} className="button button-ghost" type="button" disabled={activating} onClick={closeActivationDialog}>취소</button>
+                  <button className="button button-primary" type="button" disabled={saving || activating || changedKeys.length > 0} onClick={() => void activateVersion()}>
                     {activating ? '활성화 중…' : '신규 작업에 활성화'}
                   </button>
                 </div>

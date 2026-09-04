@@ -359,7 +359,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 .prompt-template-key { display: block; margin-bottom: 5px; color: var(--accent-dark); font-family: var(--font-geist-mono), monospace; font-size: 8px; font-weight: 750; letter-spacing: .04em; }
 .prompt-template-status { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .prompt-textarea-label { display: block; margin-bottom: 7px; color: var(--ink-soft); font-size: 10px; font-weight: 720; }
-.prompt-textarea { min-height: 250px; padding: 14px; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 11px; line-height: 1.6; tab-size: 2; }
+.prompt-textarea { min-height: 250px; padding: 14px; font-family: var(--font-geist-mono), ui-monospace, monospace; font-size: 13px; line-height: 1.6; tab-size: 2; }
 .prompt-textarea[aria-invalid="true"] { border-color: #dc7b8b; }
 .prompt-editor-meta { display: flex; margin-top: 7px; gap: 12px; justify-content: flex-end; color: var(--muted-light); font-size: 8px; }
 .prompt-token-help { display: grid; margin-top: 11px; padding: 11px 12px; gap: 8px; color: var(--muted); background: var(--surface-soft); border-radius: 9px; font-family: var(--font-geist-mono), monospace; font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; }
@@ -492,7 +492,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
   .prompt-release-summary .button, .prompt-activation-confirm .button, .prompt-save-bar .button { width: 100%; }
   .prompt-activation-confirm .inline-actions { width: 100%; }
   .prompt-template-status { justify-content: flex-start; }
-  .prompt-textarea { min-height: 300px; font-size: 10px; }
+  .prompt-textarea { min-height: 300px; font-size: 16px; }
   .prompt-save-bar { bottom: calc(67px + env(safe-area-inset-bottom)); }
 }
 
