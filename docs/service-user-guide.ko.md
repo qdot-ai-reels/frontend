@@ -114,16 +114,18 @@ OPENROUTER_API_KEY는 backend가 읽는 루트 .env에만 둔다.
 
 ### 3.2 시작
 
-프로젝트 최상위 폴더에서 실행한다.
+먼저 [프로젝트 설치 및 운영 가이드](./project-setup-and-operations-guide.ko.md)처럼
+현재 shell의 `QUEDOT_ROOT`에 준비된 통합 workspace의 절대 경로를 지정하고 실행한다.
 
 ~~~bash
-cd /Users/flowkater/workspace/side/reels-george
+cd "${QUEDOT_ROOT:?QUEDOT_ROOT를 먼저 설정하세요}"
 ./tools/start_local_stack.sh
 ~~~
 
 이 스크립트는 `frontend`와 `backend` 형제 폴더를 함께 둔 현재 통합 workspace의
-최상위에 있다. `frontend` 저장소만 따로 clone한 환경에는 포함되지 않으므로,
-그 경우에는 각 저장소의 README에 따라 서비스를 개별 실행해야 한다.
+최상위에 있다. `frontend` 저장소만 따로 clone한 환경에는 포함되지 않고 현재 기능 branch도 아직
+원격에 없다. Exact revision과 versioned 상위 도구가 전달되기 전에는 fresh clone을 현재 Studio의
+실행 환경으로 사용하지 않는다.
 
 시작 스크립트는 다음 순서로 동작한다.
 
@@ -1097,6 +1099,7 @@ flowchart TB
 
 ## 16. 관련 문서
 
+- [프로젝트 설치·환경변수·실행·운영 가이드](./project-setup-and-operations-guide.ko.md)
 - [Frontend 개요와 실행 계약](../README.md)
 - [UX 아키텍처와 인수 기준](./studio-ux-architecture.md)
 - Backend API의 상세 계약은 backend 저장소의 docs/studio-workflow-contract.md를 참고한다.

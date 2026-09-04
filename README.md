@@ -2,6 +2,8 @@
 
 검수된 상품 에셋으로 production 숏폼 작업을 만들고, 진행 상태와 후보별 기술 검수·비용을 관리하는 Next.js 16 앱입니다.
 
+프로젝트 설치, `.env` 구성, 실행·검증·로그·장애 대응은
+[프로젝트 설치 및 운영 가이드](./docs/project-setup-and-operations-guide.ko.md)를 참고하세요.
 메뉴별 화면 사용법, 프롬프트 버전 운영, 비용·오류 복구와 Production 검수 절차는
 [상세 서비스 사용 가이드](./docs/service-user-guide.ko.md)를 참고하세요.
 
@@ -34,7 +36,9 @@ npm run build
 
 ## 환경 변수
 
-`.env.local`에는 backend 주소와 공개 가능한 화면 기본값만 둡니다. `NEXT_PUBLIC_` 값은 브라우저 번들에 포함되므로 API key 같은 비밀값을 넣으면 안 됩니다.
+`.env.local`에는 backend 주소와 공개 가능한 화면 기본값만 둡니다. 먼저
+`cp .env.example .env.local`로 안전한 예제를 복사할 수 있습니다. `NEXT_PUBLIC_` 값은 브라우저
+번들에 포함되므로 API key 같은 비밀값을 넣으면 안 됩니다.
 
 ```dotenv
 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8001
@@ -43,7 +47,7 @@ NEXT_PUBLIC_VIDEO_MODEL_ID=bytedance/seedance-2.0
 NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED=false
 ```
 
-지정 모델 모드는 모델 이름만 보고 자동 활성화하지 않습니다. 실제·합성 portrait가 현재 Seedance privacy gate에서 거부된 증거가 있으므로 기본값은 비활성이며, 동의된 에셋과 provider canary를 별도로 통과한 배포에서만 `NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED=true`로 명시할 수 있습니다. Backend의 `OPENROUTER_VIDEO_MODEL`을 바꾼 배포는 같은 값으로 `NEXT_PUBLIC_VIDEO_MODEL_ID`도 설정하고 다시 빌드해야 합니다. 활성화된 경우에도 레퍼런스는 공개 HTTPS 직접 이미지 URL 1~2개만 허용하며 localhost, 사설망, `data:` URL과 인증 정보가 포함된 URL은 frontend에서 거부합니다. 실제 이미지 내용·크기·형식은 backend가 다시 검수합니다. OpenRouter key는 backend `.env`에만 둡니다.
+지정 모델 모드는 모델 이름만 보고 자동 활성화하지 않습니다. 실제·합성 portrait가 현재 Seedance privacy gate에서 거부된 증거가 있으므로 기본값은 비활성이며, 동의된 에셋과 provider canary를 별도로 통과한 배포에서만 `NEXT_PUBLIC_IDENTITY_REFERENCE_PRODUCTION_ENABLED=true`로 명시할 수 있습니다. Backend의 `OPENROUTER_VIDEO_MODEL`을 바꾼 배포는 같은 값으로 `NEXT_PUBLIC_VIDEO_MODEL_ID`도 설정하고 다시 빌드해야 합니다. 활성화된 경우에도 레퍼런스는 공개 HTTPS 직접 이미지 URL 1~2개만 허용하며 localhost, 사설망, `data:` URL과 인증 정보가 포함된 URL은 frontend에서 거부합니다. Backend는 URL 안전성, 파일 크기·형식·해상도와 reference 종횡비를 검사하며 이미지 의미·동의·사용 권리는 사람이 별도로 검수합니다. OpenRouter key는 Backend process가 읽는 비공개 `.env`에만 둡니다.
 
 `NEXT_PUBLIC_` 환경 변수는 `next build` 시점에 고정되므로 값을 바꾼 뒤에는 다시 빌드해야 합니다.
 
