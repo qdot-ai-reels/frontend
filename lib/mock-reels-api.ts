@@ -49,7 +49,7 @@ function buildMockScript(
           subtitle: product.name,
           voiceover: '구성.',
         },
-        notes: options.mustInclude || '상품의 핵심 장점을 전달한다.',
+        notes: options.scriptPrompt || '상품의 핵심 장점을 전달한다.',
       },
       {
         scene_name: 'CTA',
@@ -59,14 +59,12 @@ function buildMockScript(
           subtitle: options.cta,
           voiceover: '확인.',
         },
-        notes: options.mustExclude
-          ? `포함 금지: ${options.mustExclude}`
-          : '명확한 행동을 유도한다.',
+        notes: '명확한 행동을 유도한다.',
       },
     ],
     compliance_notes: {
-      avoid: options.mustExclude ? [options.mustExclude] : [],
-      focus: options.mustInclude ? [options.mustInclude] : [product.name],
+      avoid: [],
+      focus: [product.name],
     },
   };
 }

@@ -44,10 +44,16 @@ const INITIAL_OPTIONS: GenerationOptions = {
   cta: '',
   advertisingPurpose: '',
   channel: 'Instagram Reels',
-  mustInclude: '',
-  mustExclude: '',
-  extraDetails: '',
+  scriptPrompt: '',
+  videoPrompt: '',
+  useDefaultScriptPrompt: true,
+  useDefaultVideoPrompt: true,
 };
+
+const DEFAULT_SCRIPT_PROMPT =
+  '상품 정보에 근거한 Hook-Body-CTA 스크립트를 작성하고, 과장 표현을 사용하지 마세요. subtitle과 voiceover를 분리하고 대사는 장면 시간 안에 읽을 수 있도록 짧게 작성하세요.';
+const DEFAULT_VIDEO_PROMPT =
+  '스크립트의 visual 지시를 따르고 상품 형태·색상·라벨을 유지하세요. 영상 안에 자막·가격·할인·CTA 텍스트를 직접 생성하지 마세요.';
 
 const STEP_NUMBER: Record<AppStep, number> = {
   product: 1,
@@ -92,6 +98,28 @@ function formatElapsedSeconds(seconds: number | null | undefined) {
   return `${minutes}분 ${remainingSeconds}초`;
 }
 
+function estimatedVoiceoverSyllables(voiceover: string) {
+  return Array.from(voiceover.replace(/[\s.,!?·…。、！？]/g, '')).length;
+}
+
+function updateSceneField(
+  document: ScriptDocument,
+  index: number,
+  field: 'visual' | 'voiceover',
+  value: string,
+): ScriptDocument {
+  return {
+    ...document,
+    scenes: document.scenes.map((scene, sceneIndex) =>
+      sceneIndex === index
+        ? field === 'visual'
+          ? { ...scene, visual: value }
+          : { ...scene, auditory: { ...scene.auditory, voiceover: value } }
+        : scene,
+    ),
+  };
+}
+
 export default function Home() {
   const [step, setStep] = useState<AppStep>('product');
   const [selectedProduct, setSelectedProduct] = useState<Product>(PRODUCTS[0]);
@@ -99,6 +127,7 @@ export default function Home() {
   const [productIdInput, setProductIdInput] = useState(PRODUCTS[0].productId);
   const [options, setOptions] = useState<GenerationOptions>(INITIAL_OPTIONS);
   const [script, setScript] = useState<ScriptDocument | null>(null);
+  const [scriptWasEdited, setScriptWasEdited] = useState(false);
   const [videoResult, setVideoResult] = useState<VideoResult | null>(null);
   const [generationProgress, setGenerationProgress] =
     useState<GenerationJobStatusResponse | null>(null);
@@ -168,11 +197,16 @@ export default function Home() {
       setError('CTA 액션, 광고 목적, 노출 채널은 필수 입력 항목입니다.');
       return;
     }
+    if (!options.useDefaultScriptPrompt && !options.scriptPrompt.trim()) {
+      setError('기본 스크립트 프롬프트를 사용하지 않으면 새 프롬프트를 입력해주세요.');
+      return;
+    }
 
     setStep('script-loading');
     try {
       const generated = await reelsApi.generateScript(selectedProduct, options);
       setScript(generated);
+      setScriptWasEdited(false);
       setStep('script-review');
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -182,6 +216,20 @@ export default function Home() {
 
   async function generateFinalVideo() {
     if (!script) return;
+    if (!options.useDefaultVideoPrompt && !options.videoPrompt.trim()) {
+      setError('기본 영상 프롬프트를 사용하지 않으면 새 프롬프트를 입력해주세요.');
+      return;
+    }
+    const invalidScene = script.scenes.find((scene) => {
+      const duration = scene.time_range_sec.end - scene.time_range_sec.start;
+      const voiceover = scene.auditory.voiceover?.trim() ?? '';
+      return voiceover && estimatedVoiceoverSyllables(voiceover) > Math.ceil(duration * 4.5);
+    });
+    if (invalidScene) {
+      const sceneIndex = script.scenes.indexOf(invalidScene) + 1;
+      setError(`${sceneIndex}번째 장면의 대사가 장면 시간보다 깁니다. 대사를 줄인 후 다시 시도해주세요.`);
+      return;
+    }
     setError(null);
     setVideoResult(null);
     setGenerationProgress(null);
@@ -192,6 +240,8 @@ export default function Home() {
         script,
         options,
         setGenerationProgress,
+        !scriptWasEdited,
+        options.videoPrompt,
       );
       setVideoResult(generated);
       setStep('result');
@@ -223,6 +273,7 @@ export default function Home() {
   function resetFlow() {
     setStep('product');
     setScript(null);
+    setScriptWasEdited(false);
     setVideoResult(null);
     setOptions(INITIAL_OPTIONS);
     setError(null);
@@ -398,32 +449,39 @@ export default function Home() {
                 />
               </div>
 
-              <details className="optional-details" open>
-                <summary>
-                  <span>추가 세부사항</span>
-                  <small>선택 입력</small>
-                </summary>
-                <div className="optional-grid">
-                  <TextField
-                    label="꼭 포함되어야 하는 것"
-                    value={options.mustInclude}
-                    placeholder="예: 구성 수량과 할인 혜택"
-                    onChange={(value) => updateOption('mustInclude', value)}
-                  />
-                  <TextField
-                    label="절대 포함되면 안 되는 것"
-                    value={options.mustExclude}
-                    placeholder="예: 확인되지 않은 효능 표현"
-                    onChange={(value) => updateOption('mustExclude', value)}
-                  />
-                  <TextField
-                    label="기타 요청사항"
-                    value={options.extraDetails}
-                    placeholder="예: 밝고 빠른 분위기로 구성"
-                    onChange={(value) => updateOption('extraDetails', value)}
-                  />
+              <div className="prompt-editor">
+                <div className="prompt-choice-row">
+                  <label className="prompt-toggle">
+                    <input
+                      type="checkbox"
+                      checked={options.useDefaultScriptPrompt}
+                      onChange={() => updateOption('useDefaultScriptPrompt', true)}
+                    />
+                    기본 스크립트 프롬프트 사용
+                  </label>
+                  <label className="prompt-toggle">
+                    <input
+                      type="checkbox"
+                      checked={!options.useDefaultScriptPrompt}
+                      onChange={() => updateOption('useDefaultScriptPrompt', false)}
+                    />
+                    새 스크립트 프롬프트 사용
+                  </label>
                 </div>
-              </details>
+                {options.useDefaultScriptPrompt ? (
+                  <label className="prompt-field">
+                    <span>기본 스크립트 프롬프트 (읽기 전용)</span>
+                    <textarea value={DEFAULT_SCRIPT_PROMPT} readOnly />
+                  </label>
+                ) : (
+                  <TextField
+                    label="사용자 지정 스크립트 프롬프트"
+                    value={options.scriptPrompt}
+                    placeholder="사용할 스크립트 프롬프트를 직접 입력하세요."
+                    onChange={(value) => updateOption('scriptPrompt', value)}
+                  />
+                )}
+              </div>
 
               <FooterActions>
                 <button type="button" className="secondary-button" onClick={() => setStep('product')}>
@@ -463,6 +521,40 @@ export default function Home() {
               </div>
             </div>
 
+            <div className="prompt-editor">
+              <div className="prompt-choice-row">
+                <label className="prompt-toggle">
+                  <input
+                    type="checkbox"
+                    checked={options.useDefaultVideoPrompt}
+                    onChange={() => updateOption('useDefaultVideoPrompt', true)}
+                  />
+                  기본 영상 생성 프롬프트 사용
+                </label>
+                <label className="prompt-toggle">
+                  <input
+                    type="checkbox"
+                    checked={!options.useDefaultVideoPrompt}
+                    onChange={() => updateOption('useDefaultVideoPrompt', false)}
+                  />
+                  새 영상 생성 프롬프트 사용
+                </label>
+              </div>
+                {options.useDefaultVideoPrompt ? (
+                <label className="prompt-field">
+                  <span>기본 영상 생성 프롬프트 (읽기 전용)</span>
+                  <textarea value={DEFAULT_VIDEO_PROMPT} readOnly />
+                </label>
+                ) : (
+                  <TextField
+                    label="사용자 지정 영상 생성 프롬프트"
+                  value={options.videoPrompt}
+                  placeholder="사용할 영상 생성 프롬프트를 직접 입력하세요."
+                  onChange={(value) => updateOption('videoPrompt', value)}
+                />
+              )}
+            </div>
+
             <div className="scene-list">
               {script.scenes.map((scene, index) => (
                 <article className="scene-card" key={`${scene.scene_name}-${index}`}>
@@ -473,16 +565,34 @@ export default function Home() {
                     </small>
                   </div>
                   <div className="scene-content">
-                    <p>{scene.auditory.voiceover || '내레이션 없음'}</p>
-                    <small>화면: {scene.visual}</small>
+                    <label>
+                      음성 대사
+                      <textarea
+                        value={scene.auditory.voiceover ?? ''}
+                        placeholder="내레이션 없음"
+                        onChange={(event) => {
+                          setScript(updateSceneField(script, index, 'voiceover', event.target.value));
+                          setScriptWasEdited(true);
+                        }}
+                      />
+                    </label>
+                    <label>
+                      화면 연출
+                      <textarea
+                        value={scene.visual}
+                        onChange={(event) => {
+                          setScript(updateSceneField(script, index, 'visual', event.target.value));
+                          setScriptWasEdited(true);
+                        }}
+                      />
+                    </label>
                   </div>
                 </article>
               ))}
             </div>
 
             <p className="scope-note">
-              이번 주 MVP에서는 단일 스크립트 확인만 제공합니다. 후보 비교·직접 수정·추가 요청은
-              후속 범위입니다.
+              음성 대사와 화면 연출을 수정할 수 있습니다. 장면 시간은 현재 고정되어 있습니다.
             </p>
 
             <FooterActions>

@@ -25,9 +25,10 @@ export interface GenerationOptions {
   cta: string;
   advertisingPurpose: string;
   channel: string;
-  mustInclude: string;
-  mustExclude: string;
-  extraDetails: string;
+  scriptPrompt: string;
+  videoPrompt: string;
+  useDefaultScriptPrompt: boolean;
+  useDefaultVideoPrompt: boolean;
 }
 
 export interface ScriptScene {
@@ -124,6 +125,8 @@ export interface ReelsApi {
     script: ScriptDocument,
     options: GenerationOptions,
     onProgress?: (status: GenerationJobStatusResponse) => void,
+    allowScriptRegeneration?: boolean,
+    videoPrompt?: string,
   ): Promise<VideoResult>;
   renewVideoUrl(jobId: string, download?: boolean): Promise<string>;
 }
