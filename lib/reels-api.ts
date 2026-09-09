@@ -69,11 +69,9 @@ async function readError(response: Response, fallback: string): Promise<string> 
 
 function buildAdditionalPrompt(options: GenerationOptions): string {
   return [
+    options.scriptPrompt?.trim() ?? '',
     `광고 목적: ${options.advertisingPurpose}`,
     `CTA: ${options.cta}`,
-    options.mustInclude && `반드시 포함: ${options.mustInclude}`,
-    options.mustExclude && `포함 금지: ${options.mustExclude}`,
-    options.extraDetails && `추가 요청: ${options.extraDetails}`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -235,6 +233,7 @@ export const httpReelsApi: ReelsApi = {
         product: product.rawProduct,
         image_url: product.imageUrl,
         prompt: buildAdditionalPrompt(options),
+        use_default_prompt: options.useDefaultScriptPrompt,
         max_duration_seconds: options.durationSeconds,
         channel: options.channel,
       }),
@@ -251,7 +250,14 @@ export const httpReelsApi: ReelsApi = {
     return waitForScript(payload.job_id, payload.status_url);
   },
 
-  async generateFinalVideo(product, script, options, onProgress) {
+  async generateFinalVideo(
+    product,
+    script,
+    options,
+    onProgress,
+    allowScriptRegeneration = true,
+    videoPrompt = '',
+  ) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -261,6 +267,9 @@ export const httpReelsApi: ReelsApi = {
         image_url: product.imageUrl,
         influencer_image_url: AI_INFLUENCER_IMAGE_URL,
         max_duration_seconds: options.durationSeconds,
+        allow_script_regeneration: allowScriptRegeneration,
+        prompt: videoPrompt.trim() || undefined,
+        use_default_prompt: options.useDefaultVideoPrompt,
       }),
     });
 
