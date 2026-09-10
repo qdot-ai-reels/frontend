@@ -39,7 +39,7 @@ const modeLabel = USE_MOCK_FINAL_VIDEO
     : 'BACKEND MODE';
 
 const INITIAL_OPTIONS: GenerationOptions = {
-  durationSeconds: 6,
+  durationSeconds: 15,
   outputCount: 1,
   cta: '',
   advertisingPurpose: '',
@@ -65,10 +65,6 @@ const STEP_NUMBER: Record<AppStep, number> = {
 };
 
 const STEP_LABELS = ['공구 선택', '사용자 입력', '스크립트 확인', '영상 생성 완료'];
-const VIDEO_DURATION_OPTIONS = Array.from({ length: 12 }, (_, index) => {
-  const duration = index + 4;
-  return [String(duration), `${duration}초`] as [string, string];
-});
 
 const GENERATION_STAGE_LABELS: Record<GenerationStage, string> = {
   QUEUED: '생성 작업 준비 중',
@@ -193,11 +189,7 @@ export default function Home() {
     event.preventDefault();
     setError(null);
 
-    if (!options.cta.trim() || !options.advertisingPurpose.trim() || !options.channel) {
-      setError('CTA 액션, 광고 목적, 노출 채널은 필수 입력 항목입니다.');
-      return;
-    }
-    if (!options.useDefaultScriptPrompt && !options.scriptPrompt.trim()) {
+    if (!options.useDefaultScriptPrompt && !options.scriptPrompt?.trim()) {
       setError('기본 스크립트 프롬프트를 사용하지 않으면 새 프롬프트를 입력해주세요.');
       return;
     }
@@ -409,46 +401,6 @@ export default function Home() {
             />
 
             <form onSubmit={generateScript}>
-              <div className="settings-strip">
-                <SelectField
-                  label="영상 길이"
-                  value={String(options.durationSeconds)}
-                  onChange={(value) => updateOption('durationSeconds', Number(value))}
-                  options={VIDEO_DURATION_OPTIONS}
-                />
-                <ReadOnlyField label="화면 비율" value="9:16" />
-                <ReadOnlyField label="해상도" value="자동" />
-                <ReadOnlyField label="출력물 개수" value="1개 (MVP)" />
-              </div>
-
-              <div className="form-grid">
-                <TextField
-                  label="CTA 액션 / 영상 마지막 문구"
-                  value={options.cta}
-                  placeholder="예: 지금 프로필 링크에서 확인하세요"
-                  required
-                  onChange={(value) => updateOption('cta', value)}
-                />
-                <TextField
-                  label="광고 목적"
-                  value={options.advertisingPurpose}
-                  placeholder="예: 신제품 공동구매 전환 유도"
-                  required
-                  onChange={(value) => updateOption('advertisingPurpose', value)}
-                />
-                <SelectField
-                  label="노출 채널"
-                  value={options.channel}
-                  required
-                  onChange={(value) => updateOption('channel', value)}
-                  options={[
-                    ['Instagram Reels', 'Instagram Reels'],
-                    ['YouTube Shorts', 'YouTube Shorts'],
-                    ['TikTok', 'TikTok'],
-                  ]}
-                />
-              </div>
-
               <div className="prompt-editor">
                 <div className="prompt-choice-row">
                   <label className="prompt-toggle">
@@ -752,44 +704,6 @@ function TextField({
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
       />
-    </label>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  options,
-  required = false,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: [string, string][];
-  required?: boolean;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="form-field compact">
-      <span>
-        {label} {required && <em>필수</em>}
-      </span>
-      <select value={value} required={required} onChange={(event) => onChange(event.target.value)}>
-        {options.map(([optionValue, optionLabel]) => (
-          <option value={optionValue} key={optionValue}>
-            {optionLabel}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-function ReadOnlyField({ label, value }: { label: string; value: string }) {
-  return (
-    <label className="form-field compact">
-      <span>{label}</span>
-      <input value={value} readOnly aria-readonly="true" />
     </label>
   );
 }
