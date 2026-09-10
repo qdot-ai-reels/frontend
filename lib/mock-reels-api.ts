@@ -70,6 +70,10 @@ function buildMockScript(
 }
 
 export const mockReelsApi: ReelsApi = {
+  async getPromptTemplates() {
+    return { script_prompt: '', video_prompt: '' };
+  },
+
   async generateScript(product, options) {
     await delay(650);
     return buildMockScript(product, options);
