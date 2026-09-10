@@ -68,13 +68,7 @@ async function readError(response: Response, fallback: string): Promise<string> 
 }
 
 function buildAdditionalPrompt(options: GenerationOptions): string {
-  return [
-    options.scriptPrompt?.trim() ?? '',
-    `광고 목적: ${options.advertisingPurpose}`,
-    `CTA: ${options.cta}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return options.scriptPrompt?.trim() ?? '';
 }
 
 type JsonRecord = Record<string, unknown>;
