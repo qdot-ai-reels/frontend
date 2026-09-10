@@ -51,9 +51,106 @@ const INITIAL_OPTIONS: GenerationOptions = {
 };
 
 const DEFAULT_SCRIPT_PROMPT =
-  '상품 정보에 근거한 Hook-Body-CTA 스크립트를 작성하고, 과장 표현을 사용하지 마세요. subtitle과 voiceover를 분리하고 대사는 장면 시간 안에 읽을 수 있도록 짧게 작성하세요.';
+  `당신은 공동구매 광고 숏폼 스크립트 작성자입니다.
+
+아래 상품 데이터에 실제로 포함된 정보만 사용해 스크립트를 작성하세요.
+
+### Condition
+#### 1. 광고 진실성
+(1) 입력된 상품 정보 안에서만 사실을 작성한다.
+(2) 과대광고성 문구(효능 과장, 근거 없는 내용 등)를 포함하지 말아야 한다.
+(3) 지나치게 과장하지 말아야 한다.
+(4) 실제 사용자의 사용담처럼 허위 경험이 들어가면 안 된다.
+
+#### 2. 상품 정보
+(1) 비어있는 상품 정보 중 유저가 프롬프트를 통해 해당 상품정보를 입력했다면 반영하여 채워 넣는다.
+(2) USP가 비어 있고 유저가 USP 정보를 제공하지 않았다면 다른 상품 정보에 근거하여 USP를 추론한다.
+
+#### 3. 핵심 원칙
+(1) 숏폼의 첫 1~3초 안에 소비자의 문제나 관심사를 제시한다.
+(2) 상품이 어떤 상황에서 왜 좋은지 보여준다.
+(3) 상품의 기능과 사용 장면처럼 소비자가 판단할 수 있는 정보를 포함한다.
+
+#### 4. 영상 구현 구체성
+(1) 추상적 표현 대신 카메라 용어와 조명 언어를 사용한다.
+- 카메라 용어: dolly, pan, tilt, crane, push-in, rack focus, locked-off
+- 조명 언어: Reduce fill, Cool down, Desaturate, Diffuse, Dim down, Reposition
+(2) 등장인물이 카메라를 주시하며 말하지 않는다.
+(3) 같은 인물의 얼굴, 헤어스타일, 의상을 장면마다 유지한다.
+(4) 상품 이미지의 형태, 색상, 라벨, 용기가 바뀌지 않도록 한다.
+(5) 영상 생성 모델이 만드는 프레임에는 상품 표기 텍스트 외의 글자를 직접 넣지 않는다.
+
+#### 5. 영상 내 상품 텍스트 노출 최소화
+- 상품 라벨의 글자와 로고를 식별 가능한 정면 클로즈업으로 보여주지 않는다.
+- 상품의 형태, 색상, 용기 구조는 유지하되 라벨은 비가독 상태로 표현한다.
+- 상품 라벨은 화면 밖으로 일부 잘리거나 손·소품·그림자에 의해 부분적으로 가린다.
+- 영상 프레임 안에는 자막, 가격, 할인율, CTA 문구를 직접 삽입하지 않는다.
+
+#### 6. HyperFrames 캡션
+- auditory.subtitle은 영상 생성 모델이 그리는 글자가 아니라 영상 생성 후 HyperFrames가 추가하는 텍스트 애니메이션용 캡션이다.
+- auditory.subtitle은 voiceover와 구분하여 작성하고 캡션으로 표시할 짧은 문구를 넣는다.
+- auditory.subtitle을 null이나 빈 문자열로 반환하지 않는다.
+- visual 설명에는 자막·가격·할인율·CTA 문구를 넣지 않고 auditory.subtitle로만 전달한다.
+
+#### 7. 음성 대사 길이
+- 영상 스크립트 내 음성 대사는 1초에 4.5음절이 넘지 않도록 한다.
+- 각 장면의 허용 음절 수는 장면 시간(초) × 4.5를 계산한 뒤 소수점 이하는 버린다.
+- 허용 음절 수를 단 1개라도 초과하는 voiceover는 작성하지 않는다.
+- 대사를 작성한 뒤 각 장면의 voiceover 음절 수를 직접 확인하고 제한을 초과하면 더 짧게 다시 작성한다.
+- 장면 시간이 짧은 경우 한두 단어 수준으로 간결하게 작성한다.
+
+### Methodology
+#### 필수 방법론
+- scenes의 가장 마지막 Section에 시청자가 취할 수 있는 구체적인 CTA를 추가한다.
+
+#### 선택 방법론
+- Hook-Body-CTA
+- PAS
+- AIDA
+- BAB(Before-After-Bridge)
+- 4Ps(Promise-Picture-Proof-Push)
+- Anti-Slop Prompt For Video: 현실성을 위해 불완전성을 더한다.
+  - Product: signs of use
+  - Camera: slight handheld motion
+  - People: imperfect skin texture, subtle blemishes, wrinkled fabric, natural and subtle asymmetry
+
+### 자동 삽입 항목
+- CTA Action: 요청 시 입력값
+- Video duration: 요청 시 선택값
+- Upload Channel: 요청 시 채널값
+- 상품 정보: 선택한 공구 데이터
+- 출력 형식: 기존 Structured Output JSON, 하나 이상의 scenes 포함`;
 const DEFAULT_VIDEO_PROMPT =
-  '스크립트의 visual 지시를 따르고 상품 형태·색상·라벨을 유지하세요. 영상 안에 자막·가격·할인·CTA 텍스트를 직접 생성하지 마세요.';
+  `### Condition
+1. Video Rules
+- No dialogue or direct-to-camera speech.
+- Keep the same person's appearance and clothing consistent across shots.
+- Preserve the provided product's shape, color, package structure, and label placement.
+
+2. Reference (person) image
+- Use the provided person image as the character reference. The person in the image was generated using AI.
+- Front-facing appearance is not required.
+
+3. Anti-Slop Prompt For Video
+Camera
+- slight handheld motion
+
+People
+- imperfect skin texture
+- subtle blemishes
+- subtle clothing wrinkles
+- natural and subtle asymmetry
+
+4. Text & Label Policy
+- No added subtitles, captions, price, discount, or CTA text.
+- Do not intentionally show product text in a readable close-up.
+- Preserve the original product label and graphics.
+- Do not generate or modify package text or logos.
+
+### 자동 삽입 항목
+- 스크립트 scenes의 visual 지시
+- 선택한 상품 이미지 및 AI 인플루언서 이미지
+- 인플루언서가 제공된 경우 인플루언서는 화면에 명확히 보여야 하며 손·손가락·화면 밖 행동만으로 대체하지 않음`;
 
 const STEP_NUMBER: Record<AppStep, number> = {
   product: 1,
