@@ -4,6 +4,7 @@ import type {
   ScriptJobStatusResponse,
   GenerationOptions,
   Product,
+  PromptTemplates,
   ReelsApi,
   ScriptDocument,
   VideoResult,
@@ -219,6 +220,16 @@ async function waitForScript(
 }
 
 export const httpReelsApi: ReelsApi = {
+  async getPromptTemplates() {
+    const response = await fetch(`${API_BASE_URL}/api/v1/reels/prompts`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      throw new Error(await readError(response, '기본 프롬프트를 불러오지 못했습니다.'));
+    }
+    return (await response.json()) as PromptTemplates;
+  },
+
   async generateScript(product, options) {
     const response = await fetch(`${API_BASE_URL}/api/v1/reels/script`, {
       method: 'POST',

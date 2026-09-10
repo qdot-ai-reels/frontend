@@ -31,6 +31,11 @@ export interface GenerationOptions {
   useDefaultVideoPrompt: boolean;
 }
 
+export interface PromptTemplates {
+  script_prompt: string;
+  video_prompt: string;
+}
+
 export interface ScriptScene {
   scene_name: string;
   time_range_sec: {
@@ -116,6 +121,7 @@ export interface VideoResult {
 }
 
 export interface ReelsApi {
+  getPromptTemplates(): Promise<PromptTemplates>;
   generateScript(
     product: Product,
     options: GenerationOptions,
