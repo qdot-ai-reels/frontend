@@ -439,6 +439,7 @@ export default function Home() {
                     <span>기본 스크립트 프롬프트 (읽기 전용)</span>
                     <textarea
                       value={promptTemplates?.script_prompt ?? '기본 프롬프트를 불러오는 중입니다.'}
+                      rows={12}
                       readOnly
                     />
                   </label>
@@ -514,6 +515,7 @@ export default function Home() {
                   <span>기본 영상 생성 프롬프트 (읽기 전용)</span>
                   <textarea
                     value={promptTemplates?.video_prompt ?? '기본 프롬프트를 불러오는 중입니다.'}
+                    rows={12}
                     readOnly
                   />
                 </label>
@@ -714,11 +716,12 @@ function TextField({
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="form-field">
+    <label className="form-field prompt-field">
       <span>
         {label} {required && <em>필수</em>}
       </span>
-      <input
+      <textarea
+        rows={12}
         value={value}
         required={required}
         placeholder={placeholder}
