@@ -273,6 +273,8 @@ export const httpReelsApi: ReelsApi = {
         influencer_image_url: AI_INFLUENCER_IMAGE_URL,
         max_duration_seconds: options.durationSeconds,
         allow_script_regeneration: allowScriptRegeneration,
+        script_prompt: buildAdditionalPrompt(options) || undefined,
+        use_default_script_prompt: options.useDefaultScriptPrompt,
         prompt: videoPrompt.trim() || undefined,
         use_default_prompt: options.useDefaultVideoPrompt,
       }),
